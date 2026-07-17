@@ -181,12 +181,12 @@ windows, per-swap fees against hourly fees, all six core pools:
 
 | pool | swaps/h | fee lift at +/-0.5% | fee lift at +/-65% | best width, hourly | best width, per-swap |
 |---|---|---|---|---|---|
-| usdc_weth_005 | 249 | 1.04x | 0.95x | 5000 | 5000 |
+| usdc_weth_005 | 249 | 1.03x | 0.94x | 5000 | 5000 |
 | usdc_weth_030 | 21 | 1.10x | 1.00x | 5000 | 5000 |
-| wbtc_weth_005 | 50 | 1.11x | 0.99x | 5000 | 5000 |
+| wbtc_weth_005 | 50 | 1.09x | 0.99x | 5000 | 5000 |
 | wbtc_weth_030 | 9 | 0.94x | 1.00x | 5000 | 5000 |
-| weth_usdt_005 | 149 | 1.00x | 1.03x | 5000 | 5000 |
-| weth_usdt_030 | 28 | 0.96x | 1.04x | 5000 | 5000 |
+| weth_usdt_005 | 149 | 1.01x | 0.98x | 5000 | 5000 |
+| weth_usdt_030 | 28 | 1.00x | 1.03x | 5000 | 5000 |
 
 The discretization was worth between -7% and +11% of fee income, with no consistent
 sign, and **the optimal width does not move on any pool**. It is nowhere near the 2x
