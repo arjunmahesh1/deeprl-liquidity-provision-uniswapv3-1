@@ -381,6 +381,63 @@ Note PPO has the BEST validation score of all nine (-1,623) and finishes 4th on 
 Heuristics move -40 to +203 from validation to test; every RL algorithm drops 1,100
 to 1,850. Simple rules cannot overfit 14 training windows; a neural policy can.
 
+### LVR reward shaping: REJECTED, and the diagnosis is the split, not the reward
+
+The argument was that `fee - dIL` is unlearnable because one step of dIL against the
+hold basket is
+
+    dIL = (hold0 - a0) * dP  -  (1/2) * a0'(P) * dP^2
+
+whose first term is a first-order martingale no action influences, and that
+benchmarking against a portfolio holding the position's CURRENT amounts for one step
+cancels it exactly, because that benchmark's exposure IS a0*dP. That is
+loss-versus-rebalancing. Implemented as `reward_shaping="lvr"`, trained on, evaluated
+on the true reward.
+
+The mechanism works: LVR is non-negative, zero out of position, never touches the
+reported reward, and cuts the reward's standard deviation by 2.8x to 18x. **It does
+not make the problem learnable.** Pooled validation, same widths, comparable arms:
+
+| arm | pooled val | distinct actions |
+|---|---|---|
+| Passive (never act) | **-1,110** | 1.0 |
+| ILMinimizer(24,out) | -1,364 | 2.7 |
+| RecentreWhenOut(500) | -1,442 | 2.0 |
+| PPO, lvr shaping | -1,304 | **1.1** |
+| PPO, no shaping | -2,345 | 1.2 |
+| PPO, shadow shaping | -2,674 | 1.4 |
+
+LVR is worth +1,041 over no shaping, and the gain is **PPO learning to stop churning
+and converge toward doing nothing**. It still does not reach passive, and at 1.1
+distinct actions it is not controlling anything. The pre-registered guard (hard-fail
+a run using one action) fails it. The shadow variate is worse than no shaping at all.
+
+**The reason is a regime shift between validation and test, and it explains the whole
+RL result.** Passive is the BEST arm on validation (-1,110) and the WORST on test
+(-3,173); `RecentreWhenOut` is the worst on validation (-1,442) and the best on test
+(-1,787). The ordering inverts. Mean absolute price move per window is 23.2% on
+train, 26.4% on validation, 30.7% on test, and on the four WETH-against-stablecoin
+pools the test windows move 38% against 26% on validation.
+
+So an agent that selects on validation is selecting in a regime where doing nothing
+is optimal, learns exactly that, and is then tested in a regime where recentring
+pays. **The heuristics are immune because their functional form is conditional**:
+"recentre when out of range" fires only when needed, costing little in a calm regime
+and paying in a volatile one. A learned policy instead absorbs the marginal frequency
+of acting from its training regime and carries it forward. That is why every RL arm
+loses 480 to 2,000 from validation to test while the rules move 50 or less.
+
+This is a genuine finding rather than a defect, and it is the honest reading of H2:
+**the failure is not the algorithm, the reward, the budget, the features, or the leak.
+It is that a chronological split across a non-stationary market asks a learned policy
+to generalize across a regime change, and a two-line conditional rule does not have to.**
+
+**Open, and the one thing that could still make RL work:** the current design trains
+once on the first 50% and tests on the last 25%, a gap of years. No practitioner would
+do that. Walk-forward retraining (fit on a rolling recent window, test on the next
+one, roll) is the standard answer to non-stationarity and is what an LP would actually
+run. It is untested here and is the highest-value remaining experiment.
+
 ### Features: the previous paper's state is BETTER, and it does not matter
 
 The legacy 13-feature state (price, tick, width, liquidity, sigma, ma24, ma168,
