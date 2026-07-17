@@ -8,11 +8,11 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/wbtc_training_%j.out
 #SBATCH --error=logs/wbtc_training_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=am1015@duke.edu
+#SBATCH --mail-type=NONE
+#SBATCH --mail-user=${SLURM_MAIL_USER:-}   # set your own, or drop this line
 
 # =============================================================================
-# WBTC/USDC Baseline Comparison Training - Optimized for Duke CS Cluster
+# WBTC/USDC Baseline Comparison Training - Written for a SLURM cluster
 # =============================================================================
 
 echo "=============================================================="

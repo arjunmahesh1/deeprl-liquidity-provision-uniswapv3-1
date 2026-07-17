@@ -7,8 +7,8 @@
 #SBATCH --time=48:00:00
 #SBATCH --output=logs/wbtc_parallel_%j.out
 #SBATCH --error=logs/wbtc_parallel_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=am1015@duke.edu
+#SBATCH --mail-type=NONE
+#SBATCH --mail-user=${SLURM_MAIL_USER:-}   # set your own, or drop this line
 
 # =============================================================================
 # WBTC Parallel Training - 4 GPUs for 4x speedup

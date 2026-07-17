@@ -56,7 +56,7 @@ if [ ! -x "$PYTHON" ]; then
   exit 1
 fi
 if [ ! -d "$PROJECT/data/processed" ]; then
-  echo "no panel at $PROJECT/data/processed; run scripts/sync_to_dcc.sh first" >&2
+  echo "no panel at $PROJECT/data/processed; run scripts/sync_to_cluster.sh first" >&2
   exit 1
 fi
 

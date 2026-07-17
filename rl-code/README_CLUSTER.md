@@ -1,9 +1,9 @@
-# Running WBTC Training on Duke Cluster
+# Running WBTC Training on a SLURM Cluster
 
 ## Submit Job
 
 ```bash
-ssh [netID]@login.cs.duke.edu
+ssh <user>@<login-host>
 cd ~/deeprl-liquidity-provision-uniswapv3/rl-code
 mkdir -p logs
 sbatch slurm_wbtc_training.sh
@@ -12,7 +12,7 @@ sbatch slurm_wbtc_training.sh
 ## Check Status
 
 ```bash
-squeue -u am1015                      # Job status
+squeue -u $USER                      # Job status
 tail -f logs/wbtc_training_*.out      # Watch output
 ```
 

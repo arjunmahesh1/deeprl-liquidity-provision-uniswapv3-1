@@ -8,8 +8,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/transfer_learning_%j.out
 #SBATCH --error=logs/transfer_learning_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=am1015@duke.edu
+#SBATCH --mail-type=NONE
+#SBATCH --mail-user=${SLURM_MAIL_USER:-}   # set your own, or drop this line
 
 # =============================================================================
 # Cross-Pool Transfer Learning Experiments

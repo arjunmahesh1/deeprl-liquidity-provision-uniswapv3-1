@@ -7,8 +7,9 @@ with Deep Reinforcement Learning"* ([arXiv 2501.07508](https://arxiv.org/abs/250
 AAAI 2025 Workshop on AI for Social Impact).
 
 The environment, state, action semantics, reward, and walk-forward training follow the
-earlier work. `SPEC.md` (not in the repo, see below) records the pre-registration, the
-current results, and the full list of changes with their evidence.
+earlier work. [`SPEC.md`](SPEC.md) records the pre-registration and the current
+results; [`DIVERGENCES.md`](DIVERGENCES.md) records every change from the earlier
+work, with its evidence, and separates the bug fixes from the rest.
 
 ---
 
@@ -84,7 +85,7 @@ off as a finished run.
 **On a SLURM cluster:** `scripts/slurm/rolling_array.sh` is a thin array wrapper that
 maps `$SLURM_ARRAY_TASK_ID` onto the same `--shard` index, so there is no
 cluster-only code path. Set the paths at the top of that file and of
-`scripts/sync_to_dcc.sh` for your own account before use.
+`scripts/sync_to_cluster.sh` for your own account before use.
 
 This is a **CPU** workload. Measured ~6,100 steps/s on CPU; the nets are far too small
 for a GPU to beat kernel-launch overhead, and the env emits float64, which Apple MPS
@@ -121,18 +122,13 @@ src/deeprl_liquidity_provision_uniswapv3/
     leaderboard.py, global_rule.py, transfer_strategies.py
 scripts/
   run_algos.sh      multi-algorithm runner
-  sync_to_dcc.sh    push / pull / status against a SLURM cluster
+  sync_to_cluster.sh    push / pull / status against a SLURM cluster
   slurm/            array wrappers
   exhibits/         one script per cited claim in SPEC.md
 tests/              96 tests; the protocol and the accounting are both covered
 rl-code/            the earlier codebase, kept for reference only. Superseded; do not
                     build on it or on the outputs under rl-code/output/.
 ```
-
-## Working documents (not in the repo)
-
-`SPEC.md`, `DIVERGENCES.md`, and `reports/` are deliberately untracked and shared out
-of band. See `.gitignore` for what belongs where and why.
 
 ## Algorithms
 

@@ -156,16 +156,12 @@ dmypy.json
 __pycache__/
 *.pyc
 
-# --- internal working documents: never in the repo ---
-# The repo lives on GitHub and was public until 2026-07-17. Anything committed here
-# is reachable forever from every fork in the network, and privatising the parent does
-# NOT retract it from a public fork. These stay on disk and are shared out of band.
+# --- before making this repo public again, check ---
+# Objects pushed to a repo in a fork network stay reachable by SHA from EVERY other
+# repo in that network, including forks that predate the push and never synced.
+# Making the parent private does not retract them. So anything committed here should
+# be treated as public permanently, whatever the repo's current visibility says.
 #
-# reports/          correspondence and revision memos. Not ours to publish.
-# DIVERGENCES.md    internal audit notes.
-# SPEC.md           pre-registration and running results.
-# CLAUDE.md         local assistant/project instructions, not part of the project.
-reports/
-DIVERGENCES.md
-SPEC.md
-CLAUDE.md
+# Keep out: cluster account identifiers (usernames, login hosts, /hpc paths, personal
+# email in #SBATCH --mail-user), database credentials, .env files.
+# CLAUDE.md is tracked for now and gets ignored at submission.

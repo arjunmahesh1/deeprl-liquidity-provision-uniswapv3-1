@@ -2,7 +2,7 @@
 """
 Created on Tue Mar 12 13:24:34 2024
 
-@author: ab978
+@author: A. Brini
 """
 import pdb
 import math

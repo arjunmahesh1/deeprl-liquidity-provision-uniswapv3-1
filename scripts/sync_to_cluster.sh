@@ -1,14 +1,14 @@
 #!/bin/bash
-# Push code and the processed panel to DCC. Pull results back.
+# Push code and the processed panel to a SLURM cluster. Pull results back.
 #
 # Needs a multiplexed SSH master to be open. If your cluster enforces MFA, that first
 # connection needs a real terminal, so open it yourself once (`ssh <host>`); with
 # ControlMaster/ControlPersist configured in ~/.ssh/config it then persists and
 # everything here reuses it without another prompt.
 #
-#   ./scripts/sync_to_dcc.sh push      code + data/processed  (~541MB the first time)
-#   ./scripts/sync_to_dcc.sh pull      outputs/ back here
-#   ./scripts/sync_to_dcc.sh status    queue + how many work units have landed
+#   ./scripts/sync_to_cluster.sh push      code + data/processed  (~541MB the first time)
+#   ./scripts/sync_to_cluster.sh pull      outputs/ back here
+#   ./scripts/sync_to_cluster.sh status    queue + how many work units have landed
 #
 # The raw swap parquet in ~/Projects/defi-rv is NOT synced: it is 4.9GB and the
 # cluster only needs the aggregated panel that data/aggregate.py and data/swaps.py
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-REMOTE=${REMOTE_HOST:-dcc}          # an ssh alias in your ~/.ssh/config
+REMOTE=${REMOTE_HOST:?set REMOTE_HOST to an ssh alias in your ~/.ssh/config}
 PROJECT=${REMOTE_PROJECT:?set REMOTE_PROJECT to the project path on the cluster}
 LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
