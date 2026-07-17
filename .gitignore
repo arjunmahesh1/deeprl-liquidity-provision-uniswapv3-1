@@ -137,3 +137,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# probe outputs and scratch
+.DS_Store
+__pycache__/
+*.pyc
