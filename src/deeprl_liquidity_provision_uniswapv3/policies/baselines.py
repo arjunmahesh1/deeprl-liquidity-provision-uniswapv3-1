@@ -18,9 +18,19 @@ a defect rather than a design choice:
    by test reward, so the closed-form widths collapsed onto 0/45/50/55. Widths snap
    to whatever grid the run declares, and the grid is a pre-registered choice.
 
-`base_factor` converts a volatility into ticks. A tick is 1.0001x, so a fractional
-move s spans about s/1e-4 = s*1e4 ticks. The originals used 100, which understates
-it by 100x; both are exposed so the discrepancy is visible rather than buried.
+`base_factor` converts a volatility into a width. The originals used 100 against an
+hourly `ew_sigma` of ~0.006, which lands on ~1, whose nearest action on the
+`[0,45,50,55]` grid is 0: DO NOTHING. So the two "adaptive" baselines barely ever
+acted. That is kept, because it is the competitor the paper actually ran. It is also
+worth knowing when reading the paper's tables: of its four competitors,
+`PassiveWidthSweep` swept a single width on WETH and `VolProportionalWidth` and
+`ILMinimizer` mostly held. `base_factor` is exposed so a non-degenerate version can be
+swept deliberately and reported as an addition rather than smuggled in as a fix.
+
+Sigma throughout is `env.ew_sigma`, the EWM standard deviation of LOG returns with
+alpha=0.05, which is the series the originals read (`custom_env.py:122`). It is not
+`env.vol`, the 24h rolling standard deviation of simple returns, which belongs to the
+rebuilt `compact` state and is a different number.
 """
 from __future__ import annotations
 
@@ -44,9 +54,27 @@ class Policy:
 
 
 def _nearest_width_action(env, width: float) -> int:
-    """Index of the ENTER action whose width is closest to `width`."""
-    i = int(np.argmin(np.abs(env.action_widths - width)))
-    return env._a_enter0 + i
+    """The action whose width is closest to `width`, INCLUDING doing nothing.
+
+    The previous paper's grid is `action_values = [0, 45, 50, 55]`, and its 0 means "do
+    nothing": `custom_env.py` only recentres `if action != 0`. Its
+    `_nearest_action_index` therefore chooses between 0 and the three real widths, and a
+    computed width below ~22 maps to "do nothing".
+
+    Dropping the 0 from the candidate list, as an earlier version of this file did,
+    silently deletes that option: every computed width, however small, is forced onto a
+    real band. Combined with a `base_factor` large enough to overshoot the grid, it
+    forces the WIDEST band every time, and then `VolProportionalWidth(k=3)` and
+    `VolProportionalWidth(k=15)` are the same policy scoring the same reward with one
+    distinct action. A ten-configuration "grid" that is one policy is not a grid, and a
+    selection over it is not a selection.
+
+    Widths here are in whatever unit the env reads them in (`width_units`), so this
+    stays a like-for-like comparison against `action_widths`.
+    """
+    cand = np.concatenate([[0.0], env.action_widths])
+    i = int(np.argmin(np.abs(cand - width)))
+    return HOLD if i == 0 else env._a_enter0 + (i - 1)
 
 
 def _in_range(env) -> bool:
@@ -76,9 +104,20 @@ class VolProportionalWidth(Policy):
 
     The original recomputed and recentred every hour, which pays gas hourly. That
     is kept, since it is the strategy the paper compares against.
+
+    `base_factor=100` is the original's, and its own comment calls it "converts sigma
+    into tick units (adjust empirically)". It was never adjusted. Against an hourly
+    `ew_sigma` of ~0.006 it computes `int(3 * 0.006 * 100) = 1`, whose nearest action on
+    the `[0, 45, 50, 55]` grid is 0, i.e. DO NOTHING. So the paper's
+    volatility-proportional baseline barely ever acted, much as its
+    `PassiveWidthSweep` only ever swept one width. That is a property of the baseline it
+    was compared against, not something to quietly repair: raising base_factor to make
+    the strategy "work" would be inventing a competitor the paper never ran. Sweep
+    `base_factor` explicitly if a non-degenerate version is wanted, and report it as an
+    addition.
     """
 
-    def __init__(self, k: float, base_factor: float = 1e4, only_when_out: bool = False):
+    def __init__(self, k: float, base_factor: float = 100.0, only_when_out: bool = False):
         self.k = float(k)
         self.base_factor = float(base_factor)
         self.only_when_out = bool(only_when_out)
@@ -87,7 +126,7 @@ class VolProportionalWidth(Policy):
     def __call__(self, obs, env) -> int:
         if self.only_when_out and _in_range(env):
             return HOLD
-        width = self.k * env.vol[env.i] * self.base_factor
+        width = self.k * env.ew_sigma[env.i] * self.base_factor
         return _nearest_width_action(env, width)
 
 
@@ -99,7 +138,7 @@ class ILMinimizer(Policy):
     here so it can receive the same validation budget as everything else.
     """
 
-    def __init__(self, horizon: int = 24, base_factor: float = 1e4, only_when_out: bool = False):
+    def __init__(self, horizon: int = 24, base_factor: float = 100.0, only_when_out: bool = False):
         self.H = int(horizon)
         self.base_factor = float(base_factor)
         self.only_when_out = bool(only_when_out)
@@ -108,7 +147,7 @@ class ILMinimizer(Policy):
     def __call__(self, obs, env) -> int:
         if self.only_when_out and _in_range(env):
             return HOLD
-        width = 2.0 * env.vol[env.i] * math.sqrt(self.H) * self.base_factor
+        width = 2.0 * env.ew_sigma[env.i] * math.sqrt(self.H) * self.base_factor
         return _nearest_width_action(env, width)
 
 
@@ -131,7 +170,7 @@ class ReactiveRecentering(Policy):
             self._last_price = p
             return _nearest_width_action(env, self.width)
         jump = abs(p - self._last_price) / max(self._last_price, 1e-12)
-        if env.vol[env.i] > self.v_th or jump > self.j_th:
+        if env.ew_sigma[env.i] > self.v_th or jump > self.j_th:
             self._last_price = p
             return _nearest_width_action(env, self.width)
         return HOLD

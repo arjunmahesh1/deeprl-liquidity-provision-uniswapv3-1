@@ -210,21 +210,54 @@ Each is in `DIVERGENCES.md` with evidence.
    config was hardcoded and the validation score was computed and thrown away.
    **Every RL number produced before this is void.** Now an 8-config grid selected on
    validation, with tests pinning the agent's budget inside the heuristics' range.
-6. **`features="legacy"` did not replicate the paper's state.** It fed rolling means of
+6. **The competitors were not the paper's competitors.** Three separate faults, all
+   mine, all now fixed and mutation-tested:
+   - The width-to-action mapping dropped the paper's `0` ("do nothing") from the
+     candidate list, so every computed width, however small, was forced onto a real
+     band.
+   - `base_factor` was raised 100 -> 1e4, which overshoots the `{45,50,55}` grid, so
+     every config saturated at the widest band. `VolProportionalWidth(k=3)` and
+     `(k=15)` were then **the same policy**, identical reward, one distinct action. Ten
+     configs that are one policy is not a grid, and selecting over it is not selection.
+   - They sized off `env.vol` (24h rolling std of simple returns) where the paper sizes
+     off `env.ew_sigma` (EWM std of LOG returns, alpha=0.05). Different numbers.
+
+   **What the paper's competitors actually are**, now that they are faithful: at
+   `base_factor=100` against an hourly sigma of ~0.006, `VolProportionalWidth` computes
+   `int(3*0.006*100) = 1`, whose nearest action is 0. So it **holds throughout** and
+   scores exactly Passive. Same for `ILMinimizer(H=24)`. Measured on one window:
+
+   | policy | reward | distinct actions |
+   |---|---|---|
+   | Passive (never act) | -7,540 | 1 |
+   | VolProportionalWidth(k=3) | **-7,540** | **1** |
+   | VolProportionalWidth(k=15) | **-7,540** | **1** |
+   | ILMinimizer(H=24) | **-7,540** | **1** |
+   | ILMinimizer(H=168) | -6,673 | 2 |
+   | ReactiveRecentering | -5,501 | 2 |
+   | RecentreWhenOut(50) | -3,141 | 2 |
+
+   This is NOT something to repair. Raising `base_factor` so the strategy "works" would
+   invent a competitor the paper never ran. But it is worth knowing when reading the
+   paper's tables: of its four competitors, `PassiveWidthSweep` swept a single width on
+   WETH, and two of the other three are passive. `base_factor` is exposed so a
+   non-degenerate version can be swept deliberately and reported as an addition.
+
+7. **`features="legacy"` did not replicate the paper's state.** It fed rolling means of
    *returns* where the paper fed rolling means of *price* (~3 orders of magnitude
    apart), a rolling std of simple returns where the paper used an EWM std of *log*
    returns (alpha=0.05), and the tick span where the paper carried the raw action
    integer. Fixed and tested.
-7. **The policy network was gone.** The paper used a `CustomMLPFeatureExtractor` whose
+8. **The policy network was gone.** The paper used a `CustomMLPFeatureExtractor` whose
    first layer is `BatchNorm1d(obs_dim, affine=False)`. That BatchNorm is load-bearing:
    the state carries raw prices (~2,000) next to raw liquidity (~1e18). Ported as
    `agents/extractors.py`, reachable via `--paper-extractor`.
-8. **Swap chain order.** Swaps were sorted on `block_timestamp` with a non-stable
+9. **Swap chain order.** Swaps were sorted on `block_timestamp` with a non-stable
    quicksort while 65% share a timestamp, leaving 41% out of true chain order. Matters
    because the per-swap model chains each interval off its predecessor. Now sorted on
    `(block_number, log_index)`, stable. Effect on fees: under 0.1%. Real bug, immaterial
    outcome.
-9. **Tick bounds were not mintable** at the 0.30% tier. The paper's own `d*w` convention
+10. **Tick bounds were not mintable** at the 0.30% tier. The paper's own `d*w` convention
    fixes this for free, since `d*w` is always a multiple of `d`.
 
 ---
