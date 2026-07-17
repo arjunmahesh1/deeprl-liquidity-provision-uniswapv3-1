@@ -10,12 +10,32 @@ The benchmark is passive LP, not holding. A market maker's business is providing
 liquidity, so "withdraw and hold" is not an available strategy. Without that
 constraint the problem is degenerate: within a window, fees and impermanent loss
 both scale with liquidity at a near-constant ratio, so reward is linear in exposure
-with a negative coefficient and the optimum is to provide nothing. That is the
-loss-versus-rebalancing result, and it is not what this paper is about.
+with a negative coefficient and the optimum is to provide nothing. Measured in our
+own numbers, not imported from a theorem.
 
 ## Background
 
 An LP cannot eliminate impermanent loss. The claim under test is mitigation.
+
+**The loss in this paper is impermanent loss against holding the initial basket, and
+nothing else.** That is what the previous paper measured and what its environment
+computed. Loss-versus-rebalancing is a DIFFERENT quantity against a DIFFERENT
+benchmark (a continuously rebalanced portfolio, not a held basket), and it is not
+used here. Two corrections to earlier drafts of this file, recorded because the
+confusion cost real work:
+
+- Calling the degenerate wide-band optimum "the loss-versus-rebalancing result" was
+  wrong. LVR does not say fees fail to cover the loss; it says arbitrage loss is
+  positive and grows with volatility. Whether fees exceed it is a separate question
+  with its own literature. Our degenerate optimum is an empirical fact about this
+  panel, established by our own width sweep, and it needs no theorem to license it.
+- `reward_shaping="lvr"` was built on that mistaken framing and is REJECTED by
+  measurement (see below). It is retained only as a documented negative ablation.
+
+The old repository's `custom_env_new_lvr.py` is not a counterexample: no script
+imports it, only a commented-out notebook line refers to it, and it subtracts a
+dimensionless ratio (`lvr = ll / vp`) from dollar fees, so its units do not agree.
+It never produced a number in the paper.
 
 ## Method
 
@@ -381,7 +401,14 @@ Note PPO has the BEST validation score of all nine (-1,623) and finishes 4th on 
 Heuristics move -40 to +203 from validation to test; every RL algorithm drops 1,100
 to 1,850. Simple rules cannot overfit 14 training windows; a neural policy can.
 
-### LVR reward shaping: REJECTED, and the diagnosis is the split, not the reward
+### LVR reward shaping: REJECTED (and it was never the paper's quantity anyway)
+
+This arm exists because an earlier draft of this file mislabelled the degenerate
+optimum "the loss-versus-rebalancing result", an audit took that framing at face
+value and proposed the reward should BE loss-versus-rebalancing, and it was built.
+The paper measures impermanent loss against holding. LVR is a different benchmark
+and was not in the previous paper at any point. The arm is kept only as a documented
+negative ablation: shaping the reward does not fix the learning problem.
 
 The argument was that `fee - dIL` is unlearnable because one step of dIL against the
 hold basket is

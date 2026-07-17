@@ -129,16 +129,21 @@ class UniswapV3Env(gym.Env):
         # share almost all of that IL, so differencing cancels most of it. It works,
         # but the shadow is hand-built and its width is a free parameter we chose.
         #
-        # "lvr" is the principled version. Benchmark against a portfolio holding the
-        # position's CURRENT token amounts for one step, re-anchored every step,
-        # rather than against the basket held since entry. That benchmark's
-        # first-order exposure is a0*dP, which matches the LP's own first-order term
-        # exactly, so the difference is the pure second-order term: the martingale is
-        # removed analytically rather than approximately. This is
-        # loss-versus-rebalancing, the quantity the LVR literature built for exactly
-        # this decomposition. Costs must then be charged explicitly, because
-        # re-anchoring each step means a level shift in value no longer reaches the
-        # reward.
+        # "lvr" benchmarks against a portfolio holding the position's CURRENT token
+        # amounts for one step, re-anchored every step, rather than against the basket
+        # held since entry. That benchmark's first-order exposure is a0*dP, matching
+        # the LP's own first-order term, so the difference is the pure second-order
+        # term. This is loss-versus-rebalancing. Costs must then be charged explicitly,
+        # because re-anchoring each step means a level shift in value no longer reaches
+        # the reward.
+        #
+        # REJECTED as a training signal, and kept only as a documented ablation. It
+        # cuts the reward's standard deviation by 2.8x to 18x and still does not make
+        # the problem learnable: PPO trained on it uses 1.1 distinct actions and scores
+        # below a passive LP. Note also that LVR is NOT this paper's loss. The paper
+        # measures impermanent loss against holding, which is what `reward_true` is and
+        # what every reported number uses. LVR entered through a mislabelling in SPEC
+        # and is not a quantity the previous paper ever computed.
         if reward_shaping not in ("none", "shadow", "lvr"):
             raise ValueError(f"reward_shaping must be none|shadow|lvr, got {reward_shaping!r}")
         self.reward_shaping = "shadow" if shaped_reward else reward_shaping
