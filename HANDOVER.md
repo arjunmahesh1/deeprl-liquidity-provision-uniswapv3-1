@@ -93,9 +93,9 @@ attribution), but it is not what changed the results. Do not oversell it.
 conda env create -f environment.yml
 conda activate deeprl-uniswap
 pip install -e ".[dev]"
-pytest -q                                  # 96 tests, ~2s. If these fail, stop.
+pytest -q                                  # 128 tests, ~2s. If these fail, stop.
 
-unzip uniswap_panel.zip -d data/processed/ # 458MB, sent separately, not in git
+unzip dist/uniswap_panel.zip -d data/processed/ # 458MB, sent separately, not in git
 
 ./scripts/run_algos.sh "ppo" outputs/try   # one algorithm, all 6 pools
 ```
@@ -325,7 +325,7 @@ envs/uniswap_v3.py         the MDP: fees, IL, rebalancing, costs
 data/swaps.py              per-swap fee attribution
 agents/registry.py         5 algorithms
 policies/baselines.py      the heuristics
-tests/                     96 tests. The protocol and the accounting are both covered.
+tests/                     128 tests. The protocol and the accounting are both covered.
 SPEC.md                    pre-registration + current results, including retractions
 DIVERGENCES.md             the full audit, with file:line evidence
 rl-code/                   the old code. Reference only. Every number under
@@ -348,7 +348,26 @@ rl-code/                   the old code. Reference only. Every number under
 - **Gas is a flat $5 across 2021-2026**, when it ran 100+ gwei early and collapsed after
   Dencun. Directionally favours rebalancing in the early sample.
 
-## 9. Do not
+## 9. Known, and not fixed
+
+- **`aggregate` pools 6 heterogeneous pools into one n** and never clusters by pool.
+  24 adjacent windows from one pool are not independent; Wilcoxon assumes they are.
+  No per-pool breakdown, so the largest-scale pool dominates the pooled mean. SPEC
+  pre-registers bootstrap CIs; none are computed.
+- **`features="legacy"` breaks if `ma_windows` is not length 2** (it indexes
+  `price_mas[0]` and `[1]`, and `n_feat` is hardcoded to 13). Nothing in the CLI passes
+  `ma_windows`, so it is a latent trap rather than a live bug.
+- **`w_action` is stale after an EXIT**: the legacy state reports a live band width
+  while holding no position. Unreachable under `allow_exit=False`, which is the
+  default.
+- **DQN and QR-DQN search 4 configs where PPO searches 8**, because they have no
+  entropy coefficient. Real asymmetry, now visible rather than padded with duplicate
+  runs.
+- **On the paper's own `{45,50,55}` grid, several heuristic configs coincide.** The
+  "configs offered" counts overstate the competitors' real search: `VolProportionalWidth`
+  is passive at every k. See section 4.
+
+## 10. Do not
 
 - Trust any number in `rl-code/output/`.
 - Trust an RL result produced before the agent-budget fix.

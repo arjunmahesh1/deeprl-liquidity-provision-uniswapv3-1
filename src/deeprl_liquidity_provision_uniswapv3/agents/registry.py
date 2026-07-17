@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover
 
 # Kwargs each algorithm accepts beyond the common set. A kwarg outside its list is
 # dropped rather than passed, so a shared config cannot crash one algorithm.
-_ACCEPTS = {
+ACCEPTS = {
     "ppo": {"learning_rate", "n_steps", "batch_size", "gamma", "gae_lambda",
             "clip_range", "ent_coef", "vf_coef", "target_kl", "n_epochs"},
     "a2c": {"learning_rate", "n_steps", "gamma", "gae_lambda", "ent_coef", "vf_coef"},
@@ -53,11 +53,6 @@ ALGOS = {"ppo": PPO, "a2c": A2C, "dqn": DQN, **_CONTRIB}
 # The policy class each algorithm needs. RecurrentPPO cannot take "MlpPolicy".
 _POLICY = {"recurrentppo": "MlpLstmPolicy"}
 
-# Which algorithms can carry an arbitrary net_arch through policy_kwargs. QR-DQN takes
-# n_quantiles there too, so it is left alone unless asked.
-_ON_POLICY = {"ppo", "a2c", "recurrentppo"}
-
-
 def make_agent(name: str, env, seed: int, device: str = "cpu",
                net_arch=None, paper_extractor: bool = False, **kwargs):
     """Build an agent, passing only the kwargs its algorithm accepts.
@@ -74,7 +69,7 @@ def make_agent(name: str, env, seed: int, device: str = "cpu",
     if key not in ALGOS:
         extra = "" if _CONTRIB else " (sb3-contrib is not installed: pip install sb3-contrib)"
         raise ValueError(f"unknown algorithm {name!r}; have {sorted(ALGOS)}{extra}")
-    allowed = _ACCEPTS[key]
+    allowed = ACCEPTS[key]
     dropped = set(kwargs) - allowed
     filtered = {k: v for k, v in kwargs.items() if k in allowed}
     if dropped:
@@ -91,9 +86,8 @@ def make_agent(name: str, env, seed: int, device: str = "cpu",
         pk["features_extractor_kwargs"] = dict(features_dim=128,
                                                hidden_dim=net_arch or [4, 2],
                                                activation="tanh")
-    elif net_arch is not None and key in _ON_POLICY:
-        pk["net_arch"] = list(net_arch)
     elif net_arch is not None:
+        # Every algorithm here takes net_arch through policy_kwargs, QR-DQN included.
         pk["net_arch"] = list(net_arch)
 
     return ALGOS[key](_POLICY.get(key, "MlpPolicy"), env, seed=seed, device=device,

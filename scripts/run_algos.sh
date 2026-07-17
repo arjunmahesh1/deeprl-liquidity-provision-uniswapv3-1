@@ -24,7 +24,10 @@ SEEDS=${SEEDS:-"42 123"}
 POOLS=${POOLS:-""}          # empty = the six core pools
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# `python` is not on a bare PATH. Activate the env first (`conda activate
+# deeprl-uniswap`), or pass PYTHON=/path/to/python explicitly.
 PY=${PYTHON:-python}
+command -v "$PY" >/dev/null || { echo "no interpreter '$PY' on PATH. Run 'conda activate deeprl-uniswap' first, or set PYTHON=..." >&2; exit 1; }
 MOD=src.deeprl_liquidity_provision_uniswapv3.experiments.rolling
 
 if [ ! -d data/processed ] || [ -z "$(ls -A data/processed 2>/dev/null)" ]; then

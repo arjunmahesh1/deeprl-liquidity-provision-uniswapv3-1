@@ -22,7 +22,7 @@ to run it. [`SPEC.md`](SPEC.md) is the pre-registration and the current results;
 conda env create -f environment.yml
 conda activate deeprl-uniswap
 pip install -e ".[dev]"           # editable install; no PYTHONPATH needed afterwards
-pytest -q                          # 96 tests, ~2s
+pytest -q                          # 128 tests, ~2s
 ```
 
 TA-Lib needs its C library, which pip cannot install on its own. It comes from
@@ -36,7 +36,7 @@ The panel is not in git (458MB). Two options.
 code reads.
 
 ```bash
-unzip uniswap_panel.zip -d data/processed/
+unzip dist/uniswap_panel.zip -d data/processed/
 ```
 
 **Or rebuild it** from raw swap events. Needs the sibling `defi-rv` checkout
@@ -128,7 +128,7 @@ scripts/
   sync_to_cluster.sh    push / pull / status against a SLURM cluster
   slurm/            array wrappers
   exhibits/         one script per cited claim in SPEC.md
-tests/              96 tests; the protocol and the accounting are both covered
+tests/              128 tests; the protocol and the accounting are both covered
 rl-code/            the earlier codebase, kept for reference only. Superseded; do not
                     build on it or on the outputs under rl-code/output/.
 ```

@@ -84,6 +84,27 @@ AGENT_GRID = [
     for na in ([4, 2], [64, 64])
 ]
 
+
+def grid_for(algo: str) -> list[dict]:
+    """The grid AS THAT ALGORITHM RECEIVES IT, deduplicated.
+
+    `registry.make_agent` drops kwargs an algorithm does not accept, and the value-based
+    ones (DQN, QR-DQN) take no `ent_coef`. So the 8-config grid arrived at DQN as four
+    configs, each fit twice: half the compute wasted, and the DQN arm selecting from 4
+    while PPO selected from 8, which makes "matched budget" quietly algorithm-dependent.
+    Deduplicate on what actually reaches the constructor.
+    """
+    from ..agents.registry import ACCEPTS
+    allowed = ACCEPTS.get(algo.lower(), set()) | {"net_arch", "paper_extractor"}
+    out, seen = [], set()
+    for cfg in AGENT_GRID:
+        eff = {k: v for k, v in cfg.items() if k in allowed}
+        key = json.dumps(eff, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(eff)
+    return out
+
 HEURISTICS = {
     "Passive": lambda w: [B.Passive()],
     "RecentreWhenOut": lambda w: [B.RecentreWhenOut(x) for x in w],
@@ -208,7 +229,7 @@ def agent_step(key, split, widths, algo, schedule, steps, seeds, shaping,
     """
     # --- select on validation. Test is not reachable from this loop. -----------
     best_cfg, best_v = None, -np.inf
-    for cfg in AGENT_GRID:
+    for cfg in grid_for(algo):
         vals = []
         for s in seeds:
             env = train_env(key, widths, split, schedule, reward_shaping=shaping)
@@ -259,13 +280,21 @@ def run_unit(unit: Unit, args) -> dict:
 # ---------------------------------------------------------------- aggregation
 
 def aggregate(out_dir: Path, expected: list[Unit]) -> None:
-    files = sorted(out_dir.glob("*.json"))
+    # Filter by the config tag. Keying the FILENAME by config stopped the silent skip,
+    # but this globbed every json in the directory and dropped the tag from the `done`
+    # key, so a directory holding several algorithms (which is the whole point of
+    # sharing one) pooled them into one table and reported "2 of 1 units complete".
+    tag = expected[0].tag if expected else "untagged"
+    files = sorted(out_dir.glob(f"*__{tag}.json"))
     rows = [json.loads(f.read_text()) for f in files]
     if not rows:
-        print(f"no results in {out_dir}")
+        others = len(list(out_dir.glob("*.json")))
+        print(f"no results for config {tag} in {out_dir}"
+              + (f" ({others} json from other configs are present and were ignored)"
+                 if others else ""))
         return
-    done = {r["unit"]["pool"] + str(r["unit"]["step"]) for r in rows}
-    missing = [u for u in expected if u.pool + str(u.step) not in done]
+    done = {(r["unit"]["pool"], r["unit"]["step"]) for r in rows}
+    missing = [u for u in expected if (u.pool, u.step) not in done]
 
     res, acts = {}, {}
     for r in rows:

@@ -55,7 +55,7 @@ case "${1:-}" in
     rsync $RSYNC_FLAGS "$REMOTE:$PROJECT/outputs/" "$LOCAL/outputs/"
     ;;
   status)
-    ssh "$REMOTE" "squeue -u $USER -o '%.10i %.9P %.20j %.2t %.10M %.6D %R' | head -20; \
+    ssh "$REMOTE" "squeue -u \$USER -o '%.10i %.9P %.20j %.2t %.10M %.6D %R' | head -20; \
       echo '--- work units landed ---'; \
       for d in $PROJECT/outputs/*/; do \
         [ -d \"\$d\" ] && echo \"\$(basename \$d): \$(ls \$d/*.json 2>/dev/null | wc -l) units\"; \

@@ -388,6 +388,19 @@ class UniswapV3Env(gym.Env):
         k = max(target_usd, 0.0) / v if v > 0 else 0.0
         return a0 * k, a1 * k
 
+    def _width_ticks(self, width: float) -> float:
+        """An action width, in ticks. THE one place that applies `width_units`.
+
+        `reset()` used to build the hold basket and the shadow band by hand in raw
+        ticks while `_set_range` multiplied by tick spacing, so under the default the
+        shadow band came out `tick_spacing` times too narrow: +/-0.23% against the
+        position's +/-4.60%. It was then out of range ~97% of the time, shared almost
+        none of the position's IL, and the control variate it is supposed to provide
+        cancelled nothing.
+        """
+        w = width * self.tick_spacing if self.width_units == "spacing" else width
+        return max(np.round(w / self.tick_spacing) * self.tick_spacing, self.tick_spacing)
+
     def _set_range(self, i: int, width: float, value_usd: float) -> None:
         centre = np.round(self.tick[i] / self.tick_spacing) * self.tick_spacing
         # `width_units="spacing"` is the previous paper's convention and the default:
@@ -396,10 +409,8 @@ class UniswapV3Env(gym.Env):
         # with d = 10 at the 0.05% tier, so its action 45 is 450 ticks = +/-4.60%, NOT
         # 45 ticks = +/-0.45%. Reading that grid as raw ticks understates their bands
         # by 10x, and an earlier version of this file did exactly that and then blamed
-        # the paper for the degenerate result it produced. The convention also snaps
-        # to mintable ticks for free, since d*w is always a multiple of d.
-        w = width * self.tick_spacing if self.width_units == "spacing" else width
-        w = max(np.round(w / self.tick_spacing) * self.tick_spacing, self.tick_spacing)
+        # the paper for the degenerate result it produced.
+        w = self._width_ticks(width)
         self.tick_lower, self.tick_upper = centre - w, centre + w
         self.w_action = float(width)      # the raw action, for the legacy state
         self.sqrtA = tick_to_sqrt_price(self.tick_lower)
@@ -419,7 +430,7 @@ class UniswapV3Env(gym.Env):
         self.sqrtA = self.sqrtB = 0.0
         self.tick_lower = self.tick_upper = 0.0
         self.w_action = 0.0
-        w0 = float(self.action_widths[0])
+        w0 = self._width_ticks(float(self.action_widths[0]))
         sqrtP0 = self.sqrtP[self.i]
         sA, sB = tick_to_sqrt_price(self.tick[self.i] - w0), tick_to_sqrt_price(self.tick[self.i] + w0)
         a0, a1 = self._amounts(1.0, sqrtP0, sA, sB)
@@ -439,7 +450,7 @@ class UniswapV3Env(gym.Env):
             # comparison against passive LP is not contaminated by a one-off charge.
             self._set_range(self.i, float(self.action_widths[0]), self.capital_usd)
         # Passive shadow on the same path, for the control variate. Never acts.
-        w_s = float(self.action_widths[0])
+        w_s = self._width_ticks(float(self.action_widths[0]))
         c = np.round(self.tick[self.i] / self.tick_spacing) * self.tick_spacing
         self.sh_A = tick_to_sqrt_price(c - w_s)
         self.sh_B = tick_to_sqrt_price(c + w_s)

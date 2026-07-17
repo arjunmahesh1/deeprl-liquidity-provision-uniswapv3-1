@@ -574,6 +574,39 @@ def test_flat_price_earns_fees_and_no_il():
 
 # -------------------------------------------- loss versus rebalancing (LVR)
 
+def test_the_shadow_band_matches_the_position_band():
+    """The shadow control variate only cancels IL if it is the SAME band on the SAME
+    path. `reset()` built it in raw ticks while `_set_range` multiplied by tick
+    spacing, so under the default it came out 10x narrower (+/-0.23% against the
+    position's +/-4.60%), sat out of range ~97% of the time, shared almost none of the
+    position's IL, and cancelled nothing. Both `shadow` shaping and the hold basket ran
+    on it."""
+    import math
+    env = paper_env()
+    env.reset()
+    env.step(1)
+    span = 2 * math.log(env.sh_B / env.sh_A) / math.log(1.0001)
+    assert span == pytest.approx(env.tick_upper - env.tick_lower, rel=1e-9), (
+        f"shadow spans {span:.0f} ticks, position spans "
+        f"{env.tick_upper - env.tick_lower:.0f}"
+    )
+
+
+def test_shadow_shaping_is_not_a_no_op():
+    """Mutating sh_L to 0 used to pass the whole suite: `shadow` had no coverage."""
+    panel = make_panel(n=200, drift=0.0, vol=0.01, seed=11)
+    a = make_env(panel=panel, reward_shaping="none")
+    b = make_env(panel=panel, reward_shaping="shadow")
+    diff = False
+    for _ in range(80):
+        _, ra, ta, _, _ = a.step(HOLD)
+        _, rb, _, _, _ = b.step(HOLD)
+        diff |= abs(ra - rb) > 1e-9
+        if ta:
+            break
+    assert diff, "shadow shaping changed nothing: the variate is inert"
+
+
 def test_lvr_is_never_negative():
     """LVR >= 0 always: the AMM's value is concave in price, so a position can never
     beat holding what it held a moment ago. A negative LVR means the sign or the

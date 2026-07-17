@@ -64,14 +64,31 @@ def train_env(key, widths, split, schedule, features="legacy", n_windows=None,
 
 
 class AgentPolicy:
-    """Wraps a trained model so it plugs into the same scoring path as a heuristic."""
+    """Wraps a trained model so it plugs into the same scoring path as a heuristic.
+
+    Threads the recurrent state. `predict()` RETURNS the next hidden state, and
+    dropping it re-zeros the LSTM on every step, so a RecurrentPPO policy evaluated
+    that way is not the policy that was trained: measured, 13 of 30 actions differed.
+    Feed-forward algorithms return `None` here and are unaffected, so this costs
+    nothing and is not conditional on the algorithm.
+    """
 
     def __init__(self, model, name):
         self.model = model
         self.name = name
+        self._state = None
+        self._start = True
+
+    def reset(self) -> None:
+        self._state = None
+        self._start = True
 
     def __call__(self, obs, env):
-        return int(self.model.predict(obs, deterministic=True)[0])
+        a, self._state = self.model.predict(
+            obs, state=self._state, episode_start=np.array([self._start]),
+            deterministic=True)
+        self._start = False
+        return int(a)
 
 
 def score_agent(key, model, widths, w_indices, schedule, features="legacy"):

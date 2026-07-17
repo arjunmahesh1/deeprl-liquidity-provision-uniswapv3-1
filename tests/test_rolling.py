@@ -13,7 +13,7 @@ import argparse  # noqa: E402
 import json  # noqa: E402
 
 from src.deeprl_liquidity_provision_uniswapv3.experiments.rolling import (  # noqa: E402
-    AGENT_GRID, HEURISTICS, N_TRAIN, N_VAL, Unit, config_tag, rolling_steps,
+    AGENT_GRID, HEURISTICS, N_TRAIN, N_VAL, Unit, config_tag, grid_for, rolling_steps,
 )
 
 
@@ -49,11 +49,35 @@ def test_agent_searches_more_than_one_config():
 def test_agent_budget_is_inside_the_heuristic_range():
     """Not matched to a single number, which is impossible across arms of different
     shape, but inside the range the heuristics actually search. At either extreme the
-    comparison measures the budget rather than the method."""
-    counts = {n: len(b([100, 200, 500])) for n, b in HEURISTICS.items()}
+    comparison measures the budget rather than the method.
+
+    Counted on the SHIPPED grid. Note the heuristic counts here are configurations
+    offered, not distinct policies: on the paper's own `{45,50,55}` several of them
+    coincide (VolProportionalWidth is passive at every k), so these numbers overstate
+    the competitors' real search. See tests/test_baselines.py.
+    """
+    counts = {n: len(b([45, 50, 55])) for n, b in HEURISTICS.items()}
     assert min(counts.values()) <= len(AGENT_GRID) <= max(counts.values()), (
         f"agent searches {len(AGENT_GRID)}, heuristics search {counts}"
     )
+
+
+@pytest.mark.parametrize("algo", ["ppo", "a2c", "dqn", "qrdqn", "recurrentppo"])
+def test_no_algorithm_receives_duplicate_configs(algo):
+    """`make_agent` drops kwargs an algorithm does not accept, so a {lr} x {ent_coef}
+    grid arrives at DQN, which takes no ent_coef, as four configs each fit TWICE: half
+    the compute wasted, and its selection comparing a config against itself."""
+    g = grid_for(algo)
+    keys = [json.dumps(c, sort_keys=True, default=str) for c in g]
+    assert len(set(keys)) == len(keys), f"{algo} receives duplicates: {g}"
+
+
+def test_value_based_algorithms_get_a_smaller_but_real_grid():
+    """DQN/QR-DQN legitimately have no entropy axis, so their grid is half PPO's. That
+    is a real asymmetry in the budget and it should be visible, not silently padded
+    with duplicates."""
+    assert len(grid_for("dqn")) == len(grid_for("qrdqn")) == len(AGENT_GRID) // 2
+    assert len(grid_for("ppo")) == len(AGENT_GRID)
 
 
 # ------------------------------------------------------ the resume key

@@ -136,9 +136,35 @@ frozen here to keep the test read honest.
 - **Capital: $30,000. Gas: flat $5.** Both load-bearing and neither yet defended;
   see LIMITATIONS.md. Sensitivity to both is a robustness exhibit, not a headline.
 
-## Status: verified vs to-confirm
+## Status
 
-**Verified (tests actually run):**
+### READ THIS FIRST: which numbers in this file are alive
+
+This file is append-only and its sections are NOT in date order, so reading it top to
+bottom will hand you void numbers before it hands you live ones. Nothing below is
+trustworthy without checking it against this table.
+
+| section | status |
+|---|---|
+| "Verified (tests actually run)" immediately below | **VOID.** Produced before the cost double-charge fix, the competitor fixes, and the agent-budget fix. Its "+1,754 pooled / 56% of the loss" and its H2 rejection are superseded by the CLEAN READ. |
+| H3 "sign REVERSED" table | **VOID as evidence for the paper's claim.** It measures mitigation; the paper's sentence is about a transfer target's absolute ceiling. Different quantity, and on a panel missing the paper's own WBTC/USDC pool. |
+| "CLEAN READ" | **The most recent full read**, but it still predates the competitor fixes and the agent-budget fix, so its RL arms are not trustworthy either. |
+| "Results at REALISTIC widths" and everything under "Superseded" | **VOID.** Double-charged costs. |
+| "The rejected paper's result, decomposed" | **RETRACTED in part.** Only the leak (+675) survives; the -2,140 action-grid handicap was our own 10x unit error. |
+| "LVR reward shaping" | Live as a negative result. |
+| "RESOLVED" sections (fee discretization, double charge) | Live. |
+
+**Every RL number in this file predates the fix that gave the agent a real search
+budget, and is therefore void.** The agent's config was hardcoded and its validation
+score discarded, so it searched ONE configuration while the competitors searched up to
+27. Re-running is the top open item.
+
+**Every competitor number in this file predates the competitor fixes**, which found
+that `VolProportionalWidth` and `ILMinimizer` were saturating at the widest band with
+every configuration collapsed onto one policy, and that all four read the wrong sigma
+series.
+
+### Verified (tests actually run) -- SEE THE TABLE ABOVE, the results here are VOID
 - NOTE: the H1 numbers below were produced with the competitors consulted hourly
   while PPO was event-driven. They stand as competitor-vs-passive results, but the
   competitor-vs-PPO comparison they imply is void and is being re-run with the
@@ -329,7 +355,9 @@ entry: `@misc`, Stefan Loesch, Nate Hindman, Mark B. Richardson, Nicholas Welch,
 2021, arXiv 2111.09192, DOI 10.48550/arXiv.2111.09192. No peer-reviewed version
 exists.
 
-**Every result below predates both fixes and is being re-run.**
+**The CLEAN READ below postdates the per-swap and double-charge fixes. It PREDATES the
+competitor fixes and the agent-budget fix, so its RL arms and its competitor arms are
+both superseded. See the status table at the top of this section.**
 
 ### CLEAN READ: per-swap fees, costs charged once, stable chain order, mintable ticks
 
