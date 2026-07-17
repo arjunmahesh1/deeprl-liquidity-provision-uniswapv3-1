@@ -25,10 +25,34 @@ The fix keeps the rolling window and carves validation out of the TRAINING block
 Each window is therefore tested exactly once, by a policy fit only on data preceding
 it, with the gap between fitting and testing held to one window. Both arms, learned
 and heuristic, get the identical treatment at every step.
+
+## Running it
+
+One WORK UNIT is one (pool, rolling step): 144 of them on the core panel, and no unit
+depends on any other. A unit writes a self-describing JSON result and is skipped if
+that file already exists, so a run is resumable and a laptop and the cluster can
+write into the same directory.
+
+    # everything, here
+    python -m ...experiments.rolling --out outputs/rolling_v1
+
+    # one shard of eight (the laptop path; run the other shards elsewhere)
+    python -m ...experiments.rolling --out outputs/rolling_v1 --shard 0 --of 8
+
+    # a SLURM array maps $SLURM_ARRAY_TASK_ID onto the SAME index
+    sbatch scripts/slurm/rolling_array.sh          # see that file
+
+    # read whatever has landed and print the table
+    python -m ...experiments.rolling --out outputs/rolling_v1 --aggregate
 """
 from __future__ import annotations
 
 import argparse
+import json
+import platform
+import subprocess
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 from scipy.stats import wilcoxon
@@ -37,9 +61,22 @@ from ..agents.registry import make_agent
 from ..data.pools import CORE
 from ..policies import baselines as B
 from .agent_arm import AgentPolicy, score_agent, train_env
-from .bakeoff import (WINDOW, Split, build_env, load_panel, score)
+from .bakeoff import WINDOW, Split, build_env, load_panel, score
 
 N_TRAIN, N_VAL = 4, 1
+
+HEURISTICS = {
+    "Passive": lambda w: [B.Passive()],
+    "RecentreWhenOut": lambda w: [B.RecentreWhenOut(x) for x in w],
+    "ILMinimizer": lambda w: [B.ILMinimizer(h, only_when_out=o)
+                              for h in (24, 168) for o in (False, True)],
+    "VolProportionalWidth": lambda w: [B.VolProportionalWidth(k, only_when_out=o)
+                                       for k in (3, 5, 7, 10, 15) for o in (False, True)],
+    "ReactiveRecentering": lambda w: [B.ReactiveRecentering(x, v, j) for x in w
+                                      for v in (0.005, 0.01, 0.02)
+                                      for j in (0.005, 0.01, 0.02)],
+    "PassiveWidthSweep": lambda w: [B.PassiveWidthSweep(x) for x in w],
+}
 
 
 def rolling_steps(n_windows: int, n_train: int = N_TRAIN, n_val: int = N_VAL) -> list[Split]:
@@ -51,6 +88,44 @@ def rolling_steps(n_windows: int, n_train: int = N_TRAIN, n_val: int = N_VAL) ->
                            test=[i + block]))
     return steps
 
+
+@dataclass(frozen=True)
+class Unit:
+    """One (pool, rolling step). The atom of work, identical on any machine."""
+    pool: str
+    step: int
+
+    @property
+    def name(self) -> str:
+        return f"{self.pool}__step{self.step:03d}"
+
+
+def work_units(pools: list[str]) -> list[Unit]:
+    """Every unit, in a deterministic order, so `--shard i --of n` means the same
+    thing on the laptop and on the cluster."""
+    out = []
+    for key in sorted(pools):
+        for s in range(len(rolling_steps(len(load_panel(key)) // WINDOW))):
+            out.append(Unit(key, s))
+    return out
+
+
+def provenance(args) -> dict:
+    """Enough to tell two runs apart, and to tell a laptop shard from a cluster one."""
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                             text=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                                    text=True).stdout.strip())
+    except Exception:
+        sha, dirty = "unknown", True
+    return {"git_sha": sha, "git_dirty": dirty, "host": platform.node(),
+            "platform": platform.platform(), "python": platform.python_version(),
+            "config": {k: v for k, v in vars(args).items()
+                       if k not in ("shard", "of", "aggregate", "out")}}
+
+
+# --------------------------------------------------------------- the two arms
 
 def heuristic_step(key, split, widths, candidates):
     """Select on this step's validation window, score once on its test window."""
@@ -66,11 +141,11 @@ def heuristic_step(key, split, widths, candidates):
     if e is None or best is None:
         return None
     r, n_act = score(e, best)
-    return dict(test=r, name=best.name, n_actions=n_act)
+    return dict(test=r, val=best_v, name=best.name, n_actions=n_act)
 
 
 def agent_step(key, split, widths, algo, schedule, steps, seeds, shaping):
-    """Fit on this step's train block, select the seed on validation, test once.
+    """Fit on this step's train block, score once on its test window.
 
     Refit from scratch every step: carrying weights forward would make the effective
     training set the whole history and quietly undo the walk-forward.
@@ -81,74 +156,63 @@ def agent_step(key, split, widths, algo, schedule, steps, seeds, shaping):
         m = make_agent(algo, env, seed=s, learning_rate=3e-4, ent_coef=0.01)
         m.learn(total_timesteps=steps)
         models.append(m)
-        vals.append(score_agent(key, m, widths, split.val, schedule).mean())
+        vals.append(float(score_agent(key, m, widths, split.val, schedule).mean()))
     # Seeds are averaged on TEST, not argmaxed: picking the best seed by test reward
     # is the previous paper's max-over-trials leak wearing a different hat.
     per_seed = [score_agent(key, m, widths, split.test, schedule) for m in models]
     e = build_env(key, split.test[0], widths, schedule=schedule)
     n_act = score(e, AgentPolicy(models[0], "a"))[1] if e is not None else 0
     return dict(test=float(np.mean([p.mean() for p in per_seed])),
-                val=float(np.mean(vals)), n_actions=n_act)
+                val=float(np.mean(vals)), name=f"{algo}/{shaping}", n_actions=n_act)
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--pools", nargs="*", default=CORE)
-    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500])
-    ap.add_argument("--algo", default="ppo")
-    ap.add_argument("--schedule", default="event_driven")
-    ap.add_argument("--steps", type=int, default=20_000)
-    ap.add_argument("--seeds", nargs="*", type=int, default=[42, 123])
-    ap.add_argument("--shaping", default="none", choices=["none", "shadow", "lvr"])
-    ap.add_argument("--max-steps", type=int, default=None, help="cap rolling steps (debug)")
-    args = ap.parse_args()
+def run_unit(unit: Unit, args) -> dict:
+    """Every arm on one (pool, step). Self-contained: no other unit is consulted."""
+    split = rolling_steps(len(load_panel(unit.pool)) // WINDOW)[unit.step]
+    arms = {}
+    for name, build in HEURISTICS.items():
+        r = heuristic_step(unit.pool, split, args.widths, build(args.widths))
+        if r:
+            arms[name] = r
+    arms[args.algo.upper()] = agent_step(unit.pool, split, args.widths, args.algo,
+                                         args.schedule, args.steps, args.seeds,
+                                         args.shaping)
+    return {"unit": asdict(unit), "split": {"train": split.train, "val": split.val,
+                                            "test": split.test},
+            "arms": arms, "provenance": provenance(args)}
 
-    print(__doc__.split("\n\n")[0])
-    print(f"\ntrain {N_TRAIN} windows -> val 1 -> test 1, rolling by 1. "
-          f"{args.algo.upper()} ({args.schedule}), {args.steps:,} steps, "
-          f"seeds {args.seeds}, shaping {args.shaping}\n")
 
-    arms = {"Passive": lambda w: [B.Passive()],
-            "RecentreWhenOut": lambda w: [B.RecentreWhenOut(x) for x in w],
-            "ILMinimizer": lambda w: [B.ILMinimizer(h, only_when_out=o)
-                                      for h in (24, 168) for o in (False, True)],
-            "VolProportionalWidth": lambda w: [B.VolProportionalWidth(k, only_when_out=o)
-                                               for k in (3, 5, 7, 10, 15) for o in (False, True)],
-            "ReactiveRecentering": lambda w: [B.ReactiveRecentering(x, v, j) for x in w
-                                              for v in (0.005, 0.01, 0.02)
-                                              for j in (0.005, 0.01, 0.02)],
-            "PassiveWidthSweep": lambda w: [B.PassiveWidthSweep(x) for x in w]}
+# ---------------------------------------------------------------- aggregation
 
-    res = {a: [] for a in arms}
-    res[args.algo.upper()] = []
-    acts = {a: [] for a in res}
+def aggregate(out_dir: Path, expected: list[Unit]) -> None:
+    files = sorted(out_dir.glob("*.json"))
+    rows = [json.loads(f.read_text()) for f in files]
+    if not rows:
+        print(f"no results in {out_dir}")
+        return
+    done = {r["unit"]["pool"] + str(r["unit"]["step"]) for r in rows}
+    missing = [u for u in expected if u.pool + str(u.step) not in done]
 
-    for key in args.pools:
-        steps = rolling_steps(len(load_panel(key)) // WINDOW)
-        if args.max_steps:
-            steps = steps[:args.max_steps]
-        print(f"{key}: {len(steps)} rolling steps")
-        for split in steps:
-            for name, build in arms.items():
-                r = heuristic_step(key, split, args.widths, build(args.widths))
-                if r:
-                    res[name].append(r["test"])
-                    acts[name].append(r["n_actions"])
-            r = agent_step(key, split, args.widths, args.algo, args.schedule,
-                           args.steps, args.seeds, args.shaping)
-            res[args.algo.upper()].append(r["test"])
-            acts[args.algo.upper()].append(r["n_actions"])
+    res, acts = {}, {}
+    for r in rows:
+        for arm, d in r["arms"].items():
+            res.setdefault(arm, []).append(d["test"])
+            acts.setdefault(arm, []).append(d["n_actions"])
+    res = {k: np.asarray(v) for k, v in res.items()}
+    n = len(rows)
 
-    n = min(len(v) for v in res.values())
-    for k in res:
-        res[k] = np.asarray(res[k][:n])
+    print(f"\nWALK-FORWARD TEST. Every window tested once by a policy fit only on the "
+          f"{N_TRAIN} windows before it.")
+    print(f"{n} of {len(expected)} work units complete"
+          + (f"; MISSING {len(missing)}: {[u.name for u in missing[:6]]}" if missing else ""))
+    if missing:
+        # A silent partial aggregate reads as a finished run. Say what is absent.
+        print("  ^ the table below is a PARTIAL result and is not comparable to a full run")
+
     order = sorted(res, key=lambda k: -res[k].mean())
     passive = res["Passive"].mean()
     champ = order[0]
-
-    print(f"\nWALK-FORWARD TEST, every window tested once by a policy fit only on the "
-          f"{N_TRAIN} windows before it (n={n} window-tests per arm)")
-    print(f"{'strategy':<24} {'TEST':>9} {'mitigation':>11} {'vs best':>9} {'actions':>8}")
+    print(f"\n{'strategy':<24} {'TEST':>9} {'mitigation':>11} {'vs best':>9} {'actions':>8}")
     print("-" * 66)
     for k in order:
         print(f"{k:<24} {res[k].mean():>9,.0f} {res[k].mean()-passive:>+11,.0f} "
@@ -167,6 +231,51 @@ def main():
     for i, (nm, dm, w, p) in enumerate(tests):
         ph = min(1.0, p * (m - i))
         print(f"{nm:<24} {dm:>+9,.0f} {w:>5.0%} {p:>9.4f} {ph:>9.4f} {'*' if ph < 0.05 else '':>5}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--pools", nargs="*", default=CORE)
+    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500])
+    ap.add_argument("--algo", default="ppo")
+    ap.add_argument("--schedule", default="event_driven")
+    ap.add_argument("--steps", type=int, default=20_000)
+    ap.add_argument("--seeds", nargs="*", type=int, default=[42, 123])
+    ap.add_argument("--shaping", default="none", choices=["none", "shadow", "lvr"])
+    ap.add_argument("--out", type=Path, required=True, help="run directory for unit results")
+    ap.add_argument("--shard", type=int, default=0, help="this shard's index")
+    ap.add_argument("--of", type=int, default=1, help="total shards")
+    ap.add_argument("--aggregate", action="store_true", help="read results and report")
+    ap.add_argument("--force", action="store_true", help="recompute units already on disk")
+    args = ap.parse_args()
+
+    units = work_units(args.pools)
+    if args.aggregate:
+        aggregate(args.out, units)
+        return
+
+    assert 0 <= args.shard < args.of, f"shard {args.shard} out of range for --of {args.of}"
+    args.out.mkdir(parents=True, exist_ok=True)
+    mine = units[args.shard::args.of]
+    print(f"shard {args.shard}/{args.of}: {len(mine)} of {len(units)} work units")
+
+    for u in mine:
+        path = args.out / f"{u.name}.json"
+        if path.exists() and not args.force:
+            print(f"  {u.name}  skip (done)")
+            continue
+        r = run_unit(u, args)
+        # Write via a temp file: a shard killed mid-write must not leave a half-parsed
+        # result that the aggregate silently counts as complete.
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(r, indent=1))
+        tmp.rename(path)
+        a = r["arms"]
+        print(f"  {u.name}  " + "  ".join(f"{k[:9]} {v['test']:>7,.0f}" for k, v in a.items()))
+
+    if args.shard == 0 and args.of == 1:
+        aggregate(args.out, units)
 
 
 if __name__ == "__main__":

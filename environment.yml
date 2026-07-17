@@ -1,0 +1,32 @@
+# Pinned from the working local env, so a cluster or a laptop rebuilds the same one.
+#
+#   conda env create -f environment.yml
+#   conda activate deeprl-uniswap
+#
+# Versions are pinned deliberately. rl-code/requirements.txt pinned nothing, and the
+# stable-baselines3 API moves fast enough that this alone may explain why the previous
+# paper's results did not reproduce.
+#
+# TA-Lib needs the C library underneath the Python wrapper and does NOT pip-install on
+# its own. It comes from conda-forge here for exactly that reason; on a machine without
+# conda it is `brew install ta-lib` (macOS) or the system package first.
+#
+# CPU only. Measured at ~6,100 steps/s on CPU, and these nets are far too small for a
+# GPU to win against kernel-launch overhead; the env also emits float64, which Apple
+# MPS cannot take at all. Do not add a CUDA build expecting a speedup.
+name: deeprl-uniswap
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=2.4.*
+  - pandas=3.0.*
+  - scipy=1.17.*
+  - pyarrow=25.0.*
+  - ta-lib=0.6.*
+  - pip:
+      - torch==2.12.1
+      - stable-baselines3==2.9.0
+      - gymnasium==1.3.0
+      - sb3-contrib==2.9.0
