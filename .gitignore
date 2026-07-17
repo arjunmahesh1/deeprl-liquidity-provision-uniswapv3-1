@@ -1,11 +1,24 @@
-# my dirs to ignore
-data/
-outputs/
-old/
-results/
-figs/
-paper/
-RLFin_competition/
+# Generated data and outputs. Every pattern here is ANCHORED to the repo root with a
+# leading slash. A bare `data/` matches a directory named `data` at ANY depth, which
+# silently excluded the source package's own data module
+# (src/deeprl_liquidity_provision_uniswapv3/data/: the pool registry, the hourly
+# aggregation, the swap-level fee model) from the repository. It was never committed
+# and `git status` stayed clean while the code that builds the panel was missing.
+/data/**
+/outputs/
+/old/
+/results/
+/figs/
+/paper/
+/RLFin_competition/
+
+# ...but the panel's documentation belongs in the repo, not just on the machine that
+# built it. Re-admitting files under an excluded directory needs the directories
+# themselves re-admitted first, or git never descends far enough to see them.
+!/data/
+!/data/**/
+!/data/**/*.md
+!/data/**/CHECKSUMS.txt
 
 
 # Byte-compiled / optimized / DLL files

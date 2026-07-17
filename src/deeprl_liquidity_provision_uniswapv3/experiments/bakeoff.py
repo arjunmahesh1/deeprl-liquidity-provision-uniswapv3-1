@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from ..data.pools import POOLS
+from ..data.swaps import epoch_seconds
 from ..envs.uniswap_v3 import UniswapV3Env
 from ..envs.schedule import agent_schedule
 from ..policies import baselines as B
@@ -32,6 +34,36 @@ from ..policies import baselines as B
 PANEL = Path(__file__).resolve().parents[3] / "data/processed"
 WINDOW = 1500
 WARMUP = 168
+FEE_MODEL = "per_swap"
+
+
+@lru_cache(maxsize=None)
+def load_panel(key: str) -> pd.DataFrame:
+    return pd.read_parquet(PANEL / f"{key}_hourly.parquet")
+
+
+@lru_cache(maxsize=None)
+def load_swaps(key: str) -> pd.DataFrame:
+    """Swap-level fees, cached: the USDC/WETH 0.05% frame is 11M rows and every
+    window would otherwise re-read it from disk."""
+    path = PANEL / f"{key}_swaps.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{key}: no swap-level fees at {path}. Build them with "
+            f"`python -m {__package__.split('.')[0]}.data.swaps`."
+        )
+    return pd.read_parquet(path)
+
+
+def window_swaps(key: str, seg: pd.DataFrame) -> pd.DataFrame:
+    """The slice of the swap frame covering one window's hours."""
+    if FEE_MODEL != "per_swap":
+        return None
+    sw = load_swaps(key)
+    h = epoch_seconds(seg["timestamp"])
+    lo, hi = h[0], h[-1]
+    a, b = np.searchsorted(sw["hour"].to_numpy(), [lo, hi + 1])
+    return sw.iloc[a:b]
 
 
 @dataclass(frozen=True)
@@ -62,12 +94,13 @@ def build_env(key: str, w_index: int, widths, schedule: str | None = None,
     act, which is what makes them distinct strategies. `schedule` is only for an
     agent, which has no timing of its own."""
     p = POOLS[key]
-    df = pd.read_parquet(PANEL / f"{key}_hourly.parquet")
+    df = load_panel(key)
     lo = w_index * WINDOW
     seg = df.iloc[lo:lo + WINDOW].reset_index(drop=True)
     if len(seg) < WINDOW:
         return None
-    env = UniswapV3Env(seg, fee_tier_pct=p.fee_tier_pct, action_widths=np.asarray(widths),
+    env = UniswapV3Env(seg, swaps=window_swaps(key, seg), fee_model=FEE_MODEL,
+                       fee_tier_pct=p.fee_tier_pct, action_widths=np.asarray(widths),
                        dec0=p.dec0, dec1=p.dec1, capital_usd=30_000.0, gas_usd=5.0,
                        warmup=WARMUP, allow_exit=False, features=features)
     return env if schedule is None else agent_schedule(env, schedule)

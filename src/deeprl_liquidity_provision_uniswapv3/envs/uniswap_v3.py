@@ -26,6 +26,17 @@ What changed from the previous environment, and why each mattered:
    stops earning, which is what actually happens on-chain. Only a chosen rebalance
    costs gas.
 
+5. Fees were credited on an hour-boundary range check: in range at the end of the
+   hour meant the whole hour's aggregated fees, out of range meant zero. With ~250
+   swaps an hour a narrow band crosses in and out repeatedly inside one hour, so
+   that rule charged zero for hours we earned through, and it charged it harder the
+   narrower the band. It biased against concentration, which is the strategy this
+   paper is about, and the bias was large enough to move the optimum: scaling fee
+   income by two moved the best passive width from a degenerate +/-170% band to a
+   realistic +/-5% one. Fees are now attributed PER SWAP, against each swap's own
+   price interval and its own active liquidity. The agent still decides hourly (or
+   at whatever cadence its schedule imposes); only the accounting is finer.
+
 Conventions. L and sqrt-prices are RAW (matching the pool's `liquidity` column, so
 the share is a legitimate ratio); token amounts are decimal-adjusted for value;
 value is USD via the panel's `token0_usd` / `token1_usd`.
@@ -72,6 +83,8 @@ class UniswapV3Env(gym.Env):
         action_widths: np.ndarray,
         dec0: int,
         dec1: int,
+        swaps: pd.DataFrame | None = None,
+        fee_model: str = "per_swap",
         capital_usd: float = 30_000.0,
         gas_usd: float | np.ndarray = 5.0,
         allow_exit: bool = True,
@@ -115,6 +128,15 @@ class UniswapV3Env(gym.Env):
         if features not in ("compact", "legacy"):
             raise ValueError(f"features must be compact|legacy, got {features!r}")
         self.features = features
+        # "hourly" is kept only to measure what the discretization was worth; it is
+        # a known-biased model and must never be the arm a claim rests on.
+        if fee_model not in ("per_swap", "hourly"):
+            raise ValueError(f"fee_model must be per_swap|hourly, got {fee_model!r}")
+        if fee_model == "per_swap" and swaps is None:
+            raise ValueError("fee_model='per_swap' needs the swap-level frame; build it "
+                             "with data/swaps.py, or pass fee_model='hourly' and accept "
+                             "the bias against concentration documented in SPEC.md")
+        self.fee_model = fee_model
         self._a_exit = 1 if self.allow_exit else None
         self._a_enter0 = 2 if self.allow_exit else 1
         self.action_space = spaces.Discrete(self._a_enter0 + len(self.action_widths))
@@ -127,6 +149,7 @@ class UniswapV3Env(gym.Env):
         self.warmup = int(warmup)
 
         self._load(panel, ma_windows)
+        self._load_swaps(panel, swaps)
 
         n_feat = 13 if self.features == "legacy" else 9 + len(ma_windows)
         self.observation_space = spaces.Box(
@@ -164,6 +187,107 @@ class UniswapV3Env(gym.Env):
         if self.n <= self.warmup + 2:
             raise ValueError(f"panel too short: {self.n} rows for warmup {self.warmup}")
 
+    def _load_swaps(self, panel: pd.DataFrame, swaps: pd.DataFrame | None) -> None:
+        """Index the window's swaps by panel row, CSR-style.
+
+        `sw_off[j]:sw_off[j+1]` are the swaps that executed during hour j, so a step
+        reads one contiguous slice instead of searching. Offsets are built for every
+        row including empty hours, so a quiet hour is an empty slice rather than a
+        missing key.
+        """
+        if swaps is None:
+            self.sw_off = None
+            return
+        from ..data.swaps import epoch_seconds
+
+        p_hours = epoch_seconds(panel["timestamp"])
+        h = swaps["hour"].to_numpy()
+        # The env is handed a window, not the whole panel: drop swaps outside it.
+        keep = (h >= p_hours[0]) & (h <= p_hours[-1])
+        s = swaps.loc[keep]
+        row = np.searchsorted(p_hours, s["hour"].to_numpy())
+        assert (p_hours[row] == s["hour"].to_numpy()).all(), \
+            "swap hours do not line up with the panel's grid"
+
+        order = np.argsort(row, kind="stable")
+        row = row[order]
+        self.sw_lo = s["sqrt_lo"].to_numpy(float)[order]
+        self.sw_hi = s["sqrt_hi"].to_numpy(float)[order]
+        self.sw_liq = s["liquidity"].to_numpy(float)[order]
+        self.sw_fee = s["fee_usd"].to_numpy(float)[order]
+        self.sw_t0in = s["token0_in"].to_numpy(bool)[order]
+        self.sw_off = np.zeros(self.n + 1, dtype=np.int64)
+        np.cumsum(np.bincount(row, minlength=self.n), out=self.sw_off[1:])
+
+    def _fee_over_hour(self, j: int, L: float, sqrtA: float, sqrtB: float):
+        """Fees a position [sqrtA, sqrtB] of size L earns during hour j.
+
+        Per swap, two things are true that the hourly model could not express.
+
+        A swap has EXTENT in price, not a location: the event reports the price after
+        the swap, so the swap traversed [sqrt_lo, sqrt_hi] from the previous swap's
+        price. A band covering part of that interval was the active liquidity for
+        only part of the swap, and earns that part of the fee. Uniswap v3 credits fee
+        growth per unit of liquidity as the price crosses each initialized tick
+        (`SwapMath.computeSwapStep` runs once per tick range), so the fee a position
+        earns is the portion of the swap that executed inside its own range.
+
+        The fee is levied on the INPUT leg, so the fraction of the fee a sub-interval
+        carries is the fraction of the INPUT it absorbed, and which measure that is
+        depends on the direction. Over a step at constant L the two legs are
+            token1 in:  dy = L * d(sqrtP)          -> linear in sqrtP
+            token0 in:  dx = L * d(1/sqrtP)        -> linear in 1/sqrtP
+        so a single sqrt-price proration would be exact for one direction and wrong
+        for the other, and roughly half of all swaps are token0-in. Each swap is
+        apportioned in its own measure.
+
+        Each swap also carries its OWN active liquidity, so the share is evaluated at
+        the swap rather than at whatever L happened to be standing at the hour's end.
+
+        Returns (fee_usd, fee_weighted_in_range_fraction).
+        """
+        s, e = self.sw_off[j], self.sw_off[j + 1]
+        if e <= s or L <= 0:
+            return 0.0, 0.0
+        lo, hi = self.sw_lo[s:e], self.sw_hi[s:e]
+        t0in = self.sw_t0in[s:e]
+        # Overlap and extent, measured in sqrtP for token1-in swaps and in 1/sqrtP for
+        # token0-in ones. Inverting flips the interval, hence the swapped endpoints.
+        c_lo, c_hi = np.maximum(lo, sqrtA), np.minimum(hi, sqrtB)
+        span = np.where(t0in, 1.0 / lo - 1.0 / hi, hi - lo)
+        ov = np.where(t0in,
+                      np.where(c_hi > 0, 1.0 / np.maximum(c_lo, 1e-300)
+                               - 1.0 / np.maximum(c_hi, 1e-300), 0.0),
+                      c_hi - c_lo)
+        # A swap that did not move the price has no interval to apportion: it either
+        # executed inside the band or it did not.
+        moved = span > 0
+        frac = np.where(moved,
+                        np.clip(ov, 0.0, None) / np.where(moved, span, 1.0),
+                        ((lo >= sqrtA) & (lo <= sqrtB)).astype(float))
+        # An interval disjoint from the band inverts to a negative overlap in either
+        # measure, but clip alone cannot see a band that sits entirely outside it.
+        frac = np.where(c_hi >= c_lo, frac, 0.0)
+        f = self.sw_fee[s:e]
+        # The pool's reported liquidity excludes our hypothetical position, so our
+        # share of the fee is L/(pool_L + L): adding our own liquidity dilutes us.
+        share = L / (self.sw_liq[s:e] + L)
+        earned = float((f * frac * share).sum())
+        gross = float(f.sum())
+        return earned, (float((f * frac).sum()) / gross if gross > 0 else 0.0)
+
+    def _fee_hourly(self, j: int, L: float, sqrtA: float, sqrtB: float):
+        """The superseded model: hour-boundary range check, whole hour's fees."""
+        if not (sqrtA <= self.sqrtP[j] <= sqrtB) or L <= 0:
+            return 0.0, 0.0
+        denom = self.pool_L[j] + L
+        return float(self.fees_usd[j] * (L / denom if denom > 0 else 0.0)), 1.0
+
+    def _fee(self, j: int, L: float, sqrtA: float, sqrtB: float):
+        if self.fee_model == "per_swap":
+            return self._fee_over_hour(j, L, sqrtA, sqrtB)
+        return self._fee_hourly(j, L, sqrtA, sqrtB)
+
     # ------------------------------------------------- position mathematics
 
     def _amounts(self, L: float, sqrtP: float, sqrtA: float, sqrtB: float):
@@ -200,7 +324,10 @@ class UniswapV3Env(gym.Env):
 
     def _set_range(self, i: int, width: float, value_usd: float) -> None:
         centre = np.round(self.tick[i] / self.tick_spacing) * self.tick_spacing
-        w = max(width, self.tick_spacing)
+        # The half-width snaps to the tick spacing too, not just the centre: a
+        # position may only be minted on initializable ticks, so at the 0.30% tier
+        # (spacing 60) a 100-tick half-width is not a position anyone could open.
+        w = max(np.round(width / self.tick_spacing) * self.tick_spacing, self.tick_spacing)
         self.tick_lower, self.tick_upper = centre - w, centre + w
         self.sqrtA = tick_to_sqrt_price(self.tick_lower)
         self.sqrtB = tick_to_sqrt_price(self.tick_upper)
@@ -323,12 +450,16 @@ class UniswapV3Env(gym.Env):
         j = i + 1
         fee = 0.0
         in_range = False
+        range_frac = 0.0
         share = 0.0
         if self.in_position:
+            fee, range_frac = self._fee(j, self.L, self.sqrtA, self.sqrtB)
+            # Boundary state, for the observation and as a diagnostic. The fee no
+            # longer depends on it: `range_frac` is the fraction of the hour's fees
+            # our band was actually eligible for.
             in_range = self.sqrtA <= self.sqrtP[j] <= self.sqrtB
             denom = self.pool_L[j] + self.L
             share = self.L / denom if denom > 0 else 0.0
-            fee = float(self.fees_usd[j] * share) if in_range else 0.0
         self.cum_fees += fee
 
         # IL against the hold basket, per-step so the reward telescopes to the total.
@@ -336,14 +467,18 @@ class UniswapV3Env(gym.Env):
         d_il = il_total - self.prev_il
         self.prev_il = il_total
 
-        reward = fee - d_il - gas_cost - swap_cost
+        # Costs are NOT subtracted here. They are already paid: acting deducted them
+        # from the position's value, so they arrive through `d_il` on this very step.
+        # Subtracting them again charged every cost twice, and the double charge fell
+        # only on strategies that act, which is every arm except passive. Fees are
+        # paid out rather than reinvested, so the episode identity is
+        #     sum(reward) == cum_fees - (IL_final - IL_at_entry)
+        # and that is what `test_reward_sums_to_fees_minus_il` holds it to.
+        reward = fee - d_il
         reward_true = reward
 
         if self.shaped_reward:
-            sh_in = self.sh_A <= self.sqrtP[j] <= self.sh_B
-            sh_den = self.pool_L[j] + self.sh_L
-            sh_share = self.sh_L / sh_den if sh_den > 0 else 0.0
-            sh_fee = float(self.fees_usd[j] * sh_share) if sh_in else 0.0
+            sh_fee, _ = self._fee(j, self.sh_L, self.sh_A, self.sh_B)
             a0s, a1s = self._amounts(self.sh_L, self.sqrtP[j], self.sh_A, self.sh_B)
             sh_il = self._hold_usd(j) - self._usd(a0s, a1s, j)
             sh_d_il = sh_il - self.sh_prev_il
@@ -355,7 +490,8 @@ class UniswapV3Env(gym.Env):
         truncated = False
         info = {
             "fee": fee, "d_il": d_il, "gas": gas_cost, "swap_cost": swap_cost,
-            "in_range": bool(in_range), "share": share, "in_position": self.in_position,
+            "in_range": bool(in_range), "range_frac": range_frac, "share": share,
+            "in_position": self.in_position,
             "cum_fees": self.cum_fees, "cum_gas": self.cum_gas,
             "n_rebalances": self.n_rebalances, "n_exits": self.n_exits,
             "reward_true": reward_true,

@@ -25,8 +25,8 @@ from ..agents.registry import make_agent
 from ..data.pools import POOLS
 from ..envs.schedule import agent_schedule
 from ..policies import baselines as B
-from .bakeoff import (PANEL, WINDOW, build_env, evaluate_on_test, make_split,
-                      score, select_on_val)
+from .bakeoff import (FEE_MODEL, PANEL, WINDOW, build_env, evaluate_on_test, load_panel,
+                      make_split, score, select_on_val, window_swaps)
 
 # Deliberately small and declared up front. The competitors are selected from ~60
 # configurations; a sprawling agent grid would make "matched budget" a fiction in
@@ -43,11 +43,13 @@ SEEDS = (42, 123, 256)
 def train_env(key, widths, split, schedule, features="compact", n_windows=None):
     """One long episode over the TRAIN windows. Test is unreachable from here."""
     p = POOLS[key]
-    df = pd.read_parquet(PANEL / f"{key}_hourly.parquet")
+    df = load_panel(key)
     lo = split.train[0] * WINDOW
     hi = (split.train[-1] + 1) * WINDOW
+    seg = df.iloc[lo:hi].reset_index(drop=True)
     from ..envs.uniswap_v3 import UniswapV3Env
-    env = UniswapV3Env(df.iloc[lo:hi].reset_index(drop=True), fee_tier_pct=p.fee_tier_pct,
+    env = UniswapV3Env(seg, swaps=window_swaps(key, seg), fee_model=FEE_MODEL,
+                       fee_tier_pct=p.fee_tier_pct,
                        action_widths=np.asarray(widths), dec0=p.dec0, dec1=p.dec1,
                        capital_usd=30_000.0, gas_usd=5.0, warmup=168, allow_exit=False,
                        features=features)

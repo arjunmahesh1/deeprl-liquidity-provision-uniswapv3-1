@@ -157,43 +157,159 @@ frozen here to keep the test read honest.
   could not have separated them. Caveat: 3 pairs, so the tier effect is weakly
   powered; the pair effect is not.
 
-### OPEN DEFECT, highest priority: hourly fee discretization biases against concentration
+### RESOLVED: fees are now attributed per swap, and the discretization was worth ~5%
 
-The environment checks whether we are in range at the END of each hour and, if so,
-credits the WHOLE hour's aggregated fees:
+The environment used to check whether we were in range at the END of each hour and,
+if so, credit the WHOLE hour's aggregated fees. `usdc_weth_005` sees ~250 swaps an
+hour, so a narrow band crosses in and out repeatedly inside one hour, and any hour
+ending out of range earned zero. The prediction recorded here was that this
+**systematically penalised concentration**, that the penalty grew as the band
+narrowed, and that it was large enough to overturn the results, because scaling fee
+income by two moves the best passive width from +/-170% to +/-5%.
 
-    in_range = sqrtA <= sqrtP[j] <= sqrtB          # hour boundary only
-    fee = fees_usd[j] * share if in_range else 0
+**Fees are now attributed per swap** (`data/swaps.py`, `envs/uniswap_v3.py`). Each
+swap carries its own price interval (a Swap event reports the price AFTER the swap,
+so the swap traversed from the previous swap's price to its own), its own active
+liquidity, and its own fee, taken off the gross input leg. A band covering part of a
+swap's interval earns that part of the fee, apportioned linearly in sqrt-price. The
+22.6M swaps of the core panel re-aggregate to the hourly panel's `fees_usd` within
+0.10% on every pool. The agent still decides hourly, or at whatever cadence its
+schedule imposes; only the accounting changed.
 
-`usdc_weth_005` sees ~250 swaps/hour, so a narrow band crosses in and out many times
-within one hour. Any hour ending out of range earns zero even if we were in range
-for most of it. The penalty grows as the band narrows, so the discretization
-**systematically penalises concentration**, which is the strategy the paper is about.
+**The prediction was wrong.** Passive LP at a fixed width, medians over the 8 test
+windows, per-swap fees against hourly fees, all six core pools:
 
-This is knife-edge, not a rounding issue. Scaling fee income only, passive LP at a
-fixed width, medians over 8 windows on `usdc_weth_005`:
+| pool | swaps/h | fee lift at +/-0.5% | fee lift at +/-65% | best width, hourly | best width, per-swap |
+|---|---|---|---|---|---|
+| usdc_weth_005 | 249 | 1.04x | 0.95x | 5000 | 5000 |
+| usdc_weth_030 | 21 | 1.10x | 1.00x | 5000 | 5000 |
+| wbtc_weth_005 | 50 | 1.11x | 0.99x | 5000 | 5000 |
+| wbtc_weth_030 | 9 | 0.94x | 1.00x | 5000 | 5000 |
+| weth_usdt_005 | 149 | 1.00x | 1.03x | 5000 | 5000 |
+| weth_usdt_030 | 28 | 0.96x | 1.04x | 5000 | 5000 |
 
-| fee multiplier | best width | fees/IL at +/-0.5% |
-|---|---|---|
-| **1x (as built)** | **+/-170%, degenerate** | 0.69 |
-| **2x** | **+/-5%, realistic** | 1.37 |
-| 5x | +/-5% | 3.43 |
-| 10x+ | +/-2% | 6.86 |
+The discretization was worth between -7% and +11% of fee income, with no consistent
+sign, and **the optimal width does not move on any pool**. It is nowhere near the 2x
+the knife-edge needs. The busiest pool (249 swaps/h) shows 1.04x and the quietest
+(9 swaps/h) shows 0.94x, so the effect does not even scale with swap frequency the
+way the argument required.
 
-**Doubling fee income flips the optimum from "barely participate" to a realistic
-concentrated position.** Every conclusion below rests on our fee income being right
-within a factor of two, and there is a known bias in the direction that would flip it.
+The reason the argument failed: a passive +/-0.5% band is in range only 3.4% to 5.1%
+of the time, and that is not an artifact. Over a 1,500-hour window the price leaves a
++/-0.5% band and does not come back. The band is dead for real reasons, not
+accounting ones. Within-hour crossing is rare precisely because the price is almost
+never near a narrow band's edge.
 
-**The fix, with data already on disk:** compute the LP's fee PER SWAP, not per hour.
-`~/Projects/defi-rv/data/raw/ethereum/uniswap/<addr>.parquet` carries every swap's
-own `sqrtPriceX96`, `liquidity`, `amount0/1` and `tick`, so in-range status and the
-liquidity share can be evaluated at each swap instead of interpolated across an hour.
-That removes the discretization rather than correcting for it.
+Two things follow. The per-swap model is the correct accounting and stays, and the
+knife-edge in fee scale is still real: **the results below rest on our fee income
+being right within a factor of two, and the discretization was not the thing that
+could have moved it.** If fee income is wrong by 2x the cause is elsewhere (the
+liquidity-share denominator, or the USD valuation of a leg), and that is where an
+independent check is worth its cost.
 
-**Until this lands, treat every "RL loses" result below as provisional.**
+### RESOLVED, and it does move the numbers: gas and swap were charged TWICE
 
-**To-confirm (assumed, not yet run):**
-- Everything below is conditional on the fee-discretization defect above.
+Found by an independent audit of the fee and value accounting, not by the tests,
+which could not see it. Acting deducted its costs from the position's value:
+
+    self._set_range(i, width, max(v - gas_cost - swap_cost, 0.0))
+
+so `_value_usd(j)` was already net of them, and `il_total = hold - value` carried
+them straight back into `d_il` on the same step. The reward then subtracted them
+again:
+
+    reward = fee - d_il - gas_cost - swap_cost      # gas and swap, twice
+
+Fees are paid out rather than reinvested and costs come out of the position, so the
+episode identity is `sum(reward) == cum_fees - (IL_final - IL_at_entry)`. Measured
+against it, on a 300-hour synthetic path:
+
+| scenario | sum(reward) | fees - IL | costs | gap |
+|---|---|---|---|---|
+| never acts, no costs | -2,070.5 | -2,070.5 | 0.0 | -0.0 |
+| acts daily, gas $5 | -341.0 | -189.1 | 151.8 | **-151.8** |
+| acts every 6h, gas $5 | -757.5 | -149.4 | 608.1 | **-608.1** |
+| acts daily, gas $50 | -1,441.5 | -750.4 | 691.1 | **-691.1** |
+
+The gap equals the costs to the decimal in every scenario. The audit measures the
+double charge at **~$1,199 per 1,500h window** at a daily cadence on the real panel,
+against a pooled mitigation headline of +1,754 and a PPO-vs-competitor gap of 1,740.
+It is the same order as every number this paper reports.
+
+**It is not neutral across arms, and it biased toward the reported conclusions.**
+The double charge is proportional to how often a strategy acts, so it taxed active
+management (H1), taxed PPO relative to passive (H2), and inflated
+`ReactiveRecentering`'s -2,883. Passive never acts and never paid it, so the
+benchmark every claim is measured against was the one arm the defect could not
+touch.
+
+Fixed by keeping one channel: costs are deducted from the position's value, and
+`reward = fee - d_il`. That is preferable to the alternative (gross value, costs in
+the reward) because it makes a cost compound against the capital that remains.
+
+**Why the tests missed it.** `test_reward_decomposes_exactly` asserted the reward
+formula against its own terms, which is true by construction whatever the formula
+says, and every other test either never acted or never checked a sum. The suite now
+holds the environment to the episode identity across four cost regimes
+(`test_reward_sums_to_fees_minus_il`), verified by mutation.
+
+### Also fixed from the same audit
+
+- **Swap chain order.** `_read_swaps` sorted on `block_timestamp` with pandas'
+  default quicksort, which is not stable, while 65% of swaps share a timestamp with
+  another swap (tie groups up to 251). That left 41% of swaps out of true chain
+  order. Invisible to the hourly panel, which takes only the hour's last row, but
+  the swap-level model chains each swap's price interval off its predecessor, so the
+  order IS the data. Now sorted on `(block_number, log_index)`, stable. Measured
+  effect on fees: under 0.1%. Real bug, immaterial outcome.
+- **Proration measure.** The fee is levied on the input leg, so the share of the fee
+  a sub-interval carries is the share of the INPUT it absorbed. At constant L the
+  token1 input is `L*d(sqrtP)` and the token0 input is `L*d(1/sqrtP)`, so a single
+  sqrt-price proration is exact for one direction and wrong for the other, and about
+  half of all swaps are token0-in. Each swap is now apportioned in its own measure.
+- **Tick bounds were not mintable.** The half-width was not snapped to the tick
+  spacing, so at the 0.30% tier (spacing 60) a 100-tick half-width described a
+  position that cannot be opened on-chain. Affected all three 0.30% pools. Now
+  snapped.
+
+### Rejected: Loesch et al. is NOT an external calibration of our fee model
+
+An audit proposed that Loesch et al. (arXiv 2111.09192) validate our fee income:
+they report total fees of $199.3m against total impermanent loss of $260.1m across
+17 pools, a ratio of 0.766, and this environment produces 0.75 to 0.82. Checked
+against the paper itself rather than taken second-hand:
+
+- **The numbers are real** and their definition is ours. They define IL against the
+  HODL value of the originally contributed basket, and their "fee adjusted" position
+  strips fees and gas OUT so that IL is a pure divergence term. Same benchmark, and
+  gross of fees, which is the comparison's precondition.
+- **The ratio is theirs**, reported as "the IL was $260m or 130% of the fees earned".
+- **It still does not validate anything.** Their 0.766 is a dollar-weighted aggregate
+  over every position in 17 pools across 4.5 months, dominated by the largest
+  positions and driven by the realized ETH path and the empirical width distribution.
+  Ours is one hypothetical $30,000 position at one width over one window. Their own
+  dispersion settles it: by duration slice their fees/IL runs from about 0.91 to
+  about 0.56, and two pools exceed 1.0. A band that wide cannot discriminate our
+  0.75 to 0.82 from anything. **A match here is a coincidence of two different
+  aggregations, not evidence, and claiming otherwise would put a false validation in
+  the paper.**
+
+Usable only for the qualitative ordering: IL exceeded fees in aggregate on v3 over
+their window, so the sign of our reward is consistent with observed behavior. It
+would become a real calibration only by simulating their pool set, widths, position
+sizes, and price path, and aggregating the same way.
+
+Two traps recorded for whoever cites this. The paper says **49.5% of wallets** had
+negative returns, so "a majority of positions were net negative" is wrong twice
+over: it is not a majority, and it is wallets rather than positions. And the paper
+contradicts itself on how many pools earned fees exceeding IL, saying two on p. 25
+and three in the conclusion. It is also a non-peer-reviewed industry preprint
+(Topaze Blue), which is worth a word in the text if it carries any weight. Correct
+entry: `@misc`, Stefan Loesch, Nate Hindman, Mark B. Richardson, Nicholas Welch,
+2021, arXiv 2111.09192, DOI 10.48550/arXiv.2111.09192. No peer-reviewed version
+exists.
+
+**Every result below predates both fixes and is being re-run.**
 
 ### Results at REALISTIC widths (the wide band is degenerate)
 

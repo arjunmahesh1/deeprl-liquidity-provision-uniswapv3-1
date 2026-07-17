@@ -7,7 +7,8 @@ regenerated end to end.
 | script | what it establishes |
 |---|---|
 | `exhibit_leak_decomposition.py` | The rejected paper's result, reproduced and decomposed: the leak bought +675, the test-selected action grid handicapped competitors by -2,140, and the sign flips from -1,456 to +1,358. |
-| `exhibit_fee_scaling_knife_edge.py` | **The open defect.** Doubling fee income flips the optimum from a degenerate +/-170% band to a realistic +/-5% one. Everything rests on fee income being right within 2x, and hourly discretization biases against concentration. |
+| `exhibit_fee_scaling_knife_edge.py` | Doubling fee income flips the optimum from a degenerate +/-170% band to a realistic +/-5% one. Everything rests on fee income being right within 2x. |
+| `exhibit_fee_discretization.py` | Refutes the hypothesis that hourly fee accounting was what could move it. Per-swap attribution changes fee income by -7% to +11% across the six pools, with no consistent sign, and moves the optimal width on none of them. The per-swap model is still the correct accounting and is what the environment now runs. |
 | `exhibit_legacy_vs_compact_features.py` | The paper's 13-feature state is worth +381 to PPO and does not close the gap to the rules. |
 | `exhibit_ppo_convergence.py` | PPO plateaus by 20k agent steps; the budget is not a strawman. |
 | `exhibit_schedule_binds.py` | The decision schedule binds on hourly-acting policies and is a no-op on act-when-out ones. |
