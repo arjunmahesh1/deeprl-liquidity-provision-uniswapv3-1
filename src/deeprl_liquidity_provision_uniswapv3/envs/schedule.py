@@ -15,6 +15,14 @@ Measured on validation, PPO by decision frequency: hourly -6,502, daily -3,791,
 weekly -1,509, event-driven -1,965. Daily is deliberately not the most favorable
 choice; it is the realistic operating frequency for an LP, and a claim that holds
 there is worth more than one that needs a weekly cadence to survive.
+
+A wrapper here accumulates TWO rewards over the hours it holds, and the difference
+matters. `reward` is what the inner env returned, which is what the agent trains on
+and is shaped when shaping is on. `info["reward_true"]` is the unshaped reward, which
+is what evaluation reports. Accumulating only `reward_true` and returning it as the
+reward, as these wrappers first did, silently discarded every control variate: the
+agent is always wrapped in a schedule, so no shaping ever reached it, and three
+different shaped rewards trained bit-identical policies. Keep the two separate.
 """
 from __future__ import annotations
 
@@ -34,14 +42,15 @@ class Periodic(gym.Wrapper):
         self.name = f"periodic({k}h)"
 
     def step(self, action):
-        total, term, trunc, info = 0.0, False, False, {}
+        total, true_total, term, trunc, info = 0.0, 0.0, False, False, {}
         obs = None
         for t in range(self.k):
-            obs, _, term, trunc, info = self.env.step(action if t == 0 else 0)
-            total += info["reward_true"]
+            obs, r, term, trunc, info = self.env.step(action if t == 0 else 0)
+            total += r
+            true_total += info["reward_true"]
             if term or trunc:
                 break
-        return obs, total, term, trunc, info
+        return obs, total, term, trunc, {**info, "reward_true": true_total}
 
 
 class EventDriven(gym.Wrapper):
@@ -62,14 +71,15 @@ class EventDriven(gym.Wrapper):
         return bool(e.in_position and e.sqrtA <= e.sqrtP[e.i] <= e.sqrtB)
 
     def step(self, action):
-        obs, _, term, trunc, info = self.env.step(action)
-        total = info["reward_true"]
+        obs, r, term, trunc, info = self.env.step(action)
+        total, true_total = r, info["reward_true"]
         waited = 0
         while not (term or trunc) and self._idle() and waited < self.max_wait:
-            obs, _, term, trunc, info = self.env.step(0)
-            total += info["reward_true"]
+            obs, r, term, trunc, info = self.env.step(0)
+            total += r
+            true_total += info["reward_true"]
             waited += 1
-        return obs, total, term, trunc, info
+        return obs, total, term, trunc, {**info, "reward_true": true_total}
 
 
 def agent_schedule(env, spec: str = "daily"):

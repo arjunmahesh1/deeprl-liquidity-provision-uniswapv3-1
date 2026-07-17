@@ -22,9 +22,19 @@ Q96 = 2 ** 96
 T0 = 1_620_000_000  # arbitrary epoch second, hour-aligned
 
 
-def make_panel(n=400, price0=3000.0, drift=0.0, pool_L=1e19, fees_per_hour=1000.0):
-    """Synthetic USDC(6)/WETH(18) panel. price = USD per WETH."""
-    price = price0 * np.exp(drift * np.arange(n))
+def make_panel(n=400, price0=3000.0, drift=0.0, pool_L=1e19, fees_per_hour=1000.0,
+               vol=0.0, seed=0):
+    """Synthetic USDC(6)/WETH(18) panel. price = USD per WETH.
+
+    `vol` adds a seeded random walk on top of the drift. It defaults to zero, which
+    makes the path deterministic: fine for the accounting tests, useless for anything
+    about variance, because a deterministic path has no martingale in it to remove.
+    """
+    steps = drift * np.arange(n)
+    if vol:
+        rng = np.random.default_rng(seed)
+        steps = steps + np.cumsum(rng.normal(0.0, vol, n))
+    price = price0 * np.exp(steps)
     # Raw P = token1_raw/token0_raw = WETH_raw per USDC_raw = 1e12 / usd_per_weth.
     price_raw = 1e12 / price
     sqrtP = np.sqrt(price_raw)
@@ -434,6 +444,105 @@ def test_flat_price_earns_fees_and_no_il():
             break
     assert fees > 0
     assert abs(ils) < 1e-6 * max(env.capital_usd, 1.0)
+
+
+# -------------------------------------------- loss versus rebalancing (LVR)
+
+def test_lvr_is_never_negative():
+    """LVR >= 0 always: the AMM's value is concave in price, so a position can never
+    beat holding what it held a moment ago. A negative LVR means the sign or the
+    anchor is wrong."""
+    for drift in (0.0, 0.002, -0.002):
+        env = make_env(panel=make_panel(n=200, drift=drift))
+        for _ in range(150):
+            _, _, term, trunc, info = env.step(HOLD)
+            assert info["lvr"] >= -1e-9, f"negative LVR {info['lvr']} at drift {drift}"
+            if term or trunc:
+                break
+
+
+def test_lvr_is_zero_when_holding_tokens_out_of_position():
+    """Out of the pool there is no arbitrageur to lose to. Guards the anchor: if the
+    benchmark drifted from what we hold, this would show a phantom loss."""
+    env = make_env(enter=False, panel=make_panel(drift=0.002))
+    for _ in range(50):
+        _, _, term, trunc, info = env.step(HOLD)
+        assert not info["in_position"]
+        assert info["lvr"] == pytest.approx(0.0, abs=1e-9)
+        if term or trunc:
+            break
+
+
+def test_lvr_reward_leaves_the_reported_reward_untouched():
+    """Shaping changes what the agent trains on, NEVER what we report.
+
+    The paper's metric is mitigation against passive LP under the true reward. If a
+    control variate could move `reward_true`, the shaping would be choosing the
+    result, which is the class of failure this rebuild exists to remove.
+    """
+    panel = make_panel(n=200, drift=0.001)
+    base = make_env(panel=panel, reward_shaping="none")
+    lvr = make_env(panel=panel, reward_shaping="lvr")
+    shadow = make_env(panel=panel, reward_shaping="shadow")
+    for _ in range(150):
+        _, r_b, t_b, _, i_b = base.step(HOLD)
+        _, r_l, _, _, i_l = lvr.step(HOLD)
+        _, r_s, _, _, i_s = shadow.step(HOLD)
+        assert i_l["reward_true"] == pytest.approx(i_b["reward_true"], rel=1e-9)
+        assert i_s["reward_true"] == pytest.approx(i_b["reward_true"], rel=1e-9)
+        assert r_b == pytest.approx(i_b["reward_true"], rel=1e-9)
+        if t_b:
+            break
+
+
+@pytest.mark.parametrize("vol", [0.005, 0.01, 0.02])
+@pytest.mark.parametrize("seed", [1, 7, 13])
+def test_lvr_reward_is_less_volatile_than_the_true_reward(vol, seed):
+    """The whole point of the reformulation, stated as a test.
+
+    dIL carries a first-order price term the policy cannot influence; LVR is the
+    second-order term with that martingale removed. If the LVR reward is not
+    materially less volatile on the same path, the decomposition is not doing what it
+    claims and the reframing is worthless.
+
+    Needs a stochastic path. On a deterministic drift there is no martingale to
+    remove and the test measures nothing.
+
+    The floor is 2x, not the 10x first written here. Measured reduction runs 2.8x to
+    18x across these regimes and SHRINKS as volatility rises, because LVR itself
+    scales with the squared price move and picks up variance of its own. The
+    reduction is real and large (2x on the standard deviation is 4x on the variance)
+    but it is not the clean order of magnitude the argument suggests, and the test
+    says what is true rather than what would be convenient.
+    """
+    panel = make_panel(n=400, drift=0.0, vol=vol, seed=seed)
+    env = make_env(panel=panel, reward_shaping="lvr")
+    true_r, lvr_r = [], []
+    for _ in range(350):
+        _, r, term, trunc, info = env.step(HOLD)
+        lvr_r.append(r)
+        true_r.append(info["reward_true"])
+        if term or trunc:
+            break
+    assert np.std(lvr_r) < 0.5 * np.std(true_r), (
+        f"LVR reward sd {np.std(lvr_r):.3f} vs true {np.std(true_r):.3f}: "
+        f"the martingale was not removed"
+    )
+
+
+def test_lvr_reward_charges_costs_once_and_explicitly():
+    """Re-anchoring each step means a cost is a level shift the benchmark cannot see,
+    so the LVR reward must charge gas and swap itself. The hold-benchmark reward must
+    NOT, because there the cost arrives through d_il. Getting this backwards either
+    way is the double-charge bug in a new costume."""
+    panel = make_panel(n=60, drift=0.0)
+    env = make_env(panel=panel, enter=False, reward_shaping="lvr", gas_usd=100.0,
+                   swap_fee_frac=0.0, slippage_frac=0.0, allow_exit=False,
+                   action_widths=np.array([200]))
+    _, r, _, _, info = env.step(env._a_enter0)     # recentre: pays gas
+    assert info["gas"] == 100.0
+    # flat price => no fee difference from the anchor, so the reward is just -gas
+    assert r == pytest.approx(info["fee"] - info["lvr"] - 100.0, rel=1e-9)
 
 
 def test_observation_is_float32():

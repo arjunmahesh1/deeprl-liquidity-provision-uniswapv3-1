@@ -89,7 +89,8 @@ class UniswapV3Env(gym.Env):
         gas_usd: float | np.ndarray = 5.0,
         allow_exit: bool = True,
         features: str = "compact",
-        shaped_reward: bool = False,
+        shaped_reward: bool = False,      # deprecated alias for reward_shaping="shadow"
+        reward_shaping: str = "none",
         swap_fee_frac: float | None = None,
         slippage_frac: float = 0.0005,
         ma_windows: tuple[int, ...] = (24, 168),
@@ -114,14 +115,33 @@ class UniswapV3Env(gym.Env):
         # market-maker's actual constraint. The benchmark is then passive LP, not
         # holding, and the question is whether managing the range mitigates the loss.
         self.allow_exit = bool(allow_exit)
-        # Reward is fee - dIL - costs, and dIL is dominated by the price path, which
-        # no action influences. That exogenous term swamps the controllable one, so
-        # the policy gradient is mostly noise: PPO either freezes on HOLD or churns.
-        # shaped_reward subtracts a passive shadow position held on the SAME path.
-        # The two share almost all of that IL, so differencing cancels it and leaves
-        # the agent's own contribution. A control variate: train on it, always report
-        # the true reward (info["reward_true"]).
-        self.shaped_reward = bool(shaped_reward)
+        # Reward is fee - dIL, and dIL is dominated by the price path, which no action
+        # influences. Writing one step out against the hold basket shows why exactly:
+        #     dIL = (hold0 - a0) * dP  -  (1/2) * a0'(P) * dP^2
+        # The first term is first-order in the price move and is a martingale; only
+        # the second is steerable. The noise term is far larger, so the policy
+        # gradient is mostly noise and PPO either freezes on HOLD or churns.
+        #
+        # Two control variates, and BOTH report the true reward (info["reward_true"])
+        # whatever they train on. The reported metric never changes.
+        #
+        # "shadow" subtracts a passive shadow position held on the SAME path. The two
+        # share almost all of that IL, so differencing cancels most of it. It works,
+        # but the shadow is hand-built and its width is a free parameter we chose.
+        #
+        # "lvr" is the principled version. Benchmark against a portfolio holding the
+        # position's CURRENT token amounts for one step, re-anchored every step,
+        # rather than against the basket held since entry. That benchmark's
+        # first-order exposure is a0*dP, which matches the LP's own first-order term
+        # exactly, so the difference is the pure second-order term: the martingale is
+        # removed analytically rather than approximately. This is
+        # loss-versus-rebalancing, the quantity the LVR literature built for exactly
+        # this decomposition. Costs must then be charged explicitly, because
+        # re-anchoring each step means a level shift in value no longer reaches the
+        # reward.
+        if reward_shaping not in ("none", "shadow", "lvr"):
+            raise ValueError(f"reward_shaping must be none|shadow|lvr, got {reward_shaping!r}")
+        self.reward_shaping = "shadow" if shaped_reward else reward_shaping
         # "legacy" reproduces the rejected paper's 13-feature state, TA-Lib
         # indicators included, so its negative RL result cannot be blamed on the
         # observation. See envs/features.py.
@@ -357,6 +377,7 @@ class UniswapV3Env(gym.Env):
         self.prev_il = 0.0
         self.cum_fees = 0.0
         self.cum_gas = 0.0
+        self.cum_lvr = 0.0
         self.n_rebalances = 0
         self.n_exits = 0
         if not self.allow_exit:
@@ -375,6 +396,7 @@ class UniswapV3Env(gym.Env):
         self.prev_il = 0.0
         self.cum_fees = 0.0
         self.cum_gas = 0.0
+        self.cum_lvr = 0.0
         self.n_rebalances = 0
         self.n_exits = 0
         return self._obs(), {}
@@ -447,6 +469,11 @@ class UniswapV3Env(gym.Env):
 
         self.cum_gas += gas_cost
 
+        # The rebalancing benchmark's anchor: what we hold once the action is done.
+        # Taken AFTER the action so a cost is a level shift the benchmark never sees,
+        # which is why the LVR reward charges gas and swap explicitly.
+        anc0, anc1 = self._current_amounts(i)
+
         j = i + 1
         fee = 0.0
         in_range = False
@@ -477,7 +504,16 @@ class UniswapV3Env(gym.Env):
         reward = fee - d_il
         reward_true = reward
 
-        if self.shaped_reward:
+        # Loss versus rebalancing: hold the post-action amounts for one step and mark
+        # them at j, against what the pool actually left us at j. The difference is
+        # what arbitrageurs took, non-negative by the concavity of the AMM's value in
+        # price, and free of the first-order price exposure that dominates dIL.
+        lvr = self._usd(anc0, anc1, j) - self._usd(*self._current_amounts(j), j)
+
+        if self.reward_shaping == "lvr":
+            reward = fee - lvr - gas_cost - swap_cost
+
+        elif self.reward_shaping == "shadow":
             sh_fee, _ = self._fee(j, self.sh_L, self.sh_A, self.sh_B)
             a0s, a1s = self._amounts(self.sh_L, self.sqrtP[j], self.sh_A, self.sh_B)
             sh_il = self._hold_usd(j) - self._usd(a0s, a1s, j)
@@ -488,11 +524,12 @@ class UniswapV3Env(gym.Env):
         self.i = j
         terminated = self.i >= self.n - 2
         truncated = False
+        self.cum_lvr += lvr
         info = {
-            "fee": fee, "d_il": d_il, "gas": gas_cost, "swap_cost": swap_cost,
+            "fee": fee, "d_il": d_il, "lvr": lvr, "gas": gas_cost, "swap_cost": swap_cost,
             "in_range": bool(in_range), "range_frac": range_frac, "share": share,
             "in_position": self.in_position,
-            "cum_fees": self.cum_fees, "cum_gas": self.cum_gas,
+            "cum_fees": self.cum_fees, "cum_gas": self.cum_gas, "cum_lvr": self.cum_lvr,
             "n_rebalances": self.n_rebalances, "n_exits": self.n_exits,
             "reward_true": reward_true,
         }

@@ -40,8 +40,14 @@ PPO_GRID = [
 SEEDS = (42, 123, 256)
 
 
-def train_env(key, widths, split, schedule, features="compact", n_windows=None):
-    """One long episode over the TRAIN windows. Test is unreachable from here."""
+def train_env(key, widths, split, schedule, features="compact", n_windows=None,
+              reward_shaping="none"):
+    """One long episode over the TRAIN windows. Test is unreachable from here.
+
+    Shaping belongs HERE and only here. Evaluation always runs an unshaped env, so
+    `score` reads the true reward and a control variate can never touch a reported
+    number.
+    """
     p = POOLS[key]
     df = load_panel(key)
     lo = split.train[0] * WINDOW
@@ -52,7 +58,7 @@ def train_env(key, widths, split, schedule, features="compact", n_windows=None):
                        fee_tier_pct=p.fee_tier_pct,
                        action_widths=np.asarray(widths), dec0=p.dec0, dec1=p.dec1,
                        capital_usd=30_000.0, gas_usd=5.0, warmup=168, allow_exit=False,
-                       features=features)
+                       features=features, reward_shaping=reward_shaping)
     return Monitor(agent_schedule(env, schedule))
 
 

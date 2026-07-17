@@ -311,7 +311,47 @@ exists.
 
 **Every result below predates both fixes and is being re-run.**
 
-### Results at REALISTIC widths (the wide band is degenerate)
+### CLEAN READ: per-swap fees, costs charged once, stable chain order, mintable ticks
+
+Realistic widths {100, 200, 500} = +/-1%, +/-2%, +/-5%. Agent event-driven, 20k steps.
+48 test windows, 6 pools. Everything selected on validation, one test read.
+
+| strategy | kind | val | TEST | mitigation | vs best | p (Holm) |
+|---|---|---|---|---|---|---|
+| RecentreWhenOut | heuristic | -1,442 | **-1,787** | **+1,386** | - | - |
+| ILMinimizer | heuristic | -1,364 | -1,833 | +1,339 | -46 | 1.000 |
+| VolProportionalWidth | heuristic | -1,412 | -1,859 | +1,314 | -72 | 0.882 |
+| **PPO (event-driven)** | rl | -2,200 | -2,681 | +492 | **-894** | **0.0019** |
+| A2C (event-driven) | rl | -799 | -2,820 | +352 | -1,033 | **0.0063** |
+| DQN (event-driven) | rl | -1,552 | -3,140 | +32 | -1,353 | **0.0170** |
+| PassiveWidthSweep | heuristic | -1,021 | -3,155 | +18 | -1,368 | **0.0337** |
+| Passive (never act) | heuristic | -1,110 | -3,173 | 0 | -1,386 | **0.0221** |
+| ReactiveRecentering | heuristic | -3,204 | -3,440 | -267 | -1,653 | **0.0000** |
+
+**Charging costs once changed both conclusions from "underpowered" to significant,
+and it did NOT rescue RL.** Before the fix nothing survived Holm except
+`ReactiveRecentering` being bad. Now:
+
+- **H1 SUPPORTED, and significant.** Active range management mitigates **+1,386** of a
+  -3,173 passive loss, i.e. **44%**, and passive loses to `RecentreWhenOut` at
+  **p=0.022** paired over 48 windows. The three active heuristics cluster within 72 of
+  each other at the top, which is a stronger statement than one rule winning: several
+  independent ways of managing the range all recover roughly the same amount.
+- **H2 REJECTED, and significant.** PPO trails the best rule by **894 at p=0.0019**,
+  winning **25%** of 48 windows. Before the fix the gap was 429 at p=0.43, i.e. not
+  established. It is now established, against us. Every RL algorithm loses to every
+  active heuristic, and DQN is statistically indistinguishable from passive.
+
+The double charge had been taxing the heuristics and PPO alike, compressing
+everything toward passive and destroying the power to separate anything. Removing it
+raised the whole active field and left RL behind.
+
+Note PPO's validation (-2,200) is now WORSE than its test rank suggests, while A2C
+has the best validation of any RL arm (-799) and the second-worst RL test (-2,820).
+Simple rules move -400 to +50 from validation to test; the RL arms move -480 to
+-2,000. Fourteen training windows is not enough for a neural policy.
+
+### Superseded: results at realistic widths under the double-charged reward
 
 A +/-2000-tick band is -18% to +22%, i.e. approximately a v2 position, and it wins by
 avoiding IL rather than earning fees (fees fall 4,177 -> 829 across widths while IL
