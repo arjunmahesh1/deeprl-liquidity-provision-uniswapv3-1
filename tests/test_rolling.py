@@ -102,6 +102,27 @@ def test_the_same_config_is_the_same_unit():
     assert Unit("p", 1, "abc").name == Unit("p", 1, "abc").name
 
 
+def test_run_and_aggregate_agree_on_the_config():
+    """The runner must pass the SAME config args to the run and to the aggregate.
+
+    It did not: the aggregate call omitted --steps and --seeds, so it hashed a
+    different config than the run had written and matched nothing. Before the aggregate
+    filtered on the tag at all, this would have silently averaged whatever happened to
+    be in the directory. Guarding the script itself, because the bug was in the shell
+    glue rather than in Python.
+    """
+    sh = Path(__file__).resolve().parents[1] / "scripts/run_algos.sh"
+    body = sh.read_text()
+    # One shared arg list, used by both invocations. If someone spells the flags out
+    # twice again, the two can drift apart without anything failing loudly.
+    assert body.count("CFG=(") == 1, "the shared config arg list is gone or duplicated"
+    assert body.count('"${CFG[@]}"') == 2, (
+        "run and aggregate must both use the shared arg list; found "
+        f'{body.count(chr(34) + "${CFG[@]}" + chr(34))} use(s)'
+    )
+    assert "--aggregate" in body
+
+
 def test_config_tag_ignores_sharding():
     """--shard/--of/--out change WHERE a unit runs, not WHAT it computes. If they
     keyed the filename, two shards of one run would never merge."""

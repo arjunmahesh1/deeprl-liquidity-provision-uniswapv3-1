@@ -39,14 +39,20 @@ fi
 pool_args=""
 [ -n "$POOLS" ] && pool_args="--pools $POOLS"
 
+# EVERY invocation must carry the SAME config args, run and aggregate alike. The
+# config is hashed into each unit's filename, and the aggregate filters on that hash,
+# so an aggregate call that omits --steps/--seeds computes a different hash and matches
+# nothing. Keep this one list; do not spell the flags out twice.
+# shellcheck disable=SC2086
+CFG=(--algo "" --steps "$STEPS" --seeds $SEEDS $pool_args)
+
 for algo in $ALGOS; do
   echo ""
   echo "=============================================================="
   echo " $algo   shard $SHARD/$OF   $STEPS steps   seeds $SEEDS"
   echo "=============================================================="
-  # shellcheck disable=SC2086
-  $PY -m $MOD --algo "$algo" --out "$OUT" --shard "$SHARD" --of "$OF" \
-      --steps "$STEPS" --seeds $SEEDS $pool_args
+  CFG[1]="$algo"
+  $PY -m $MOD "${CFG[@]}" --out "$OUT" --shard "$SHARD" --of "$OF"
 done
 
 # Only the last shard to finish should report, so a sharded run does not print six
@@ -55,7 +61,7 @@ if [ "$OF" = "1" ]; then
   for algo in $ALGOS; do
     echo ""
     echo "### $algo"
-    # shellcheck disable=SC2086
-    $PY -m $MOD --algo "$algo" --out "$OUT" --aggregate $pool_args
+    CFG[1]="$algo"
+    $PY -m $MOD "${CFG[@]}" --out "$OUT" --aggregate
   done
 fi
