@@ -7,9 +7,12 @@ with Deep Reinforcement Learning"* ([arXiv 2501.07508](https://arxiv.org/abs/250
 AAAI 2025 Workshop on AI for Social Impact).
 
 The environment, state, action semantics, reward, and walk-forward training follow the
-earlier work. [`SPEC.md`](SPEC.md) records the pre-registration and the current
-results; [`DIVERGENCES.md`](DIVERGENCES.md) records every change from the earlier
-work, with its evidence, and separates the bug fixes from the rest.
+earlier work. Fees are the exception: they now come from every individual swap
+(22.6M of them) rather than from a price-displacement formula.
+
+**New here? Read [`HANDOVER.md`](HANDOVER.md)** — what changed, what did not, and how
+to run it. [`SPEC.md`](SPEC.md) is the pre-registration and the current results;
+[`DIVERGENCES.md`](DIVERGENCES.md) is the full audit with file:line evidence.
 
 ---
 
