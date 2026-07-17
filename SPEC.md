@@ -496,9 +496,36 @@ On `usdc_weth_005`, isolating each ingredient of the old protocol:
 | **Honest gap** (PPO - competitor) | **-1,456**, PPO loses |
 | **Their gap** (leaked PPO - crippled competitor) | **+1,358**, PPO wins |
 
-A 2,815 swing flips the sign. The dominant term is the ACTION GRID, not the leak:
-{45,50,55} ticks are +/-0.5% bands, in range ~1% of the time. And that grid was itself
-chosen by Optuna maximising test reward, so the leak selected the handicap.
+**RETRACTED: the action-grid half of this decomposition is an artifact of a 10x unit
+error of OUR OWN, not a defect of the previous paper.**
+
+The claim was that the dominant term is the action grid, that `{45,50,55}` are
++/-0.5% bands in range ~1% of the time, and that this handicapped the competitors by
+-2,140. It rested on feeding `{45,50,55}` into THIS env, which reads action widths as
+raw ticks. The previous env does not. It multiplies by the tick spacing:
+
+    self.d = self._fee_to_tickspacing(self.delta)          # 0.05 -> 10
+    tl, tu = m - self.d * self.w, m + self.d * self.w      # custom_env.py:292, 314
+
+So action 45 is **450 ticks = +/-4.60%**, 50 is +/-5.13%, 55 is +/-5.65%. Verified
+against the source. The previous paper's grid was never sub-1%; it is essentially
+this rebuild's own `500` (+/-5.13%), i.e. the width we adopted as the realistic fix
+after calling theirs degenerate. **Their action grid was fine. We misread it, then
+priced our misreading at -2,140 and called it the dominant term.**
+
+The leak itself (+675, tuning on test) is the one part of this decomposition that
+survives; it was measured on our own env with our own grid and does not depend on the
+unit error. Everything else in the table above is void and must be re-run with widths
+`{450, 500, 550}` before any of it is repeated.
+
+Two consequences that follow from the same fact:
+- The same grid on the 0.30% pools has `d=60`, so action 45 is 2,700 ticks, a **+/-31%
+  band**. The previous paper called this a "misalignment" with WBTC's tick spacing. It
+  is not a misalignment, it is a different strategy: +/-4.6% on WETH against +/-31% on
+  WBTC, from the identical action. That alone can explain the cross-pool differences
+  the paper attributed to fee regime.
+- Any statement here derived from "the old grid is sub-1%", including "in range ~1.2%
+  of the time", was computed in the wrong env and is withdrawn.
 - H4. Not yet tested. The previous transfer result is void: its "same-period" test
   set was a superset of its training set, its reward was an episode sum compared
   across segments of different length, and its saved outputs repeat bit-for-bit

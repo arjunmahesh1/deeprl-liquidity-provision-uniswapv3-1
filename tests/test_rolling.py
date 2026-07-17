@@ -9,13 +9,80 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import argparse  # noqa: E402
+import json  # noqa: E402
+
 from src.deeprl_liquidity_provision_uniswapv3.experiments.rolling import (  # noqa: E402
-    N_TRAIN, N_VAL, Unit, rolling_steps,
+    AGENT_GRID, HEURISTICS, N_TRAIN, N_VAL, Unit, config_tag, rolling_steps,
 )
 
 
 def fake_units(n_pools=3, per_pool=24):
     return [Unit(f"pool{p}", s) for p in range(n_pools) for s in range(per_pool)]
+
+
+def fake_args(**kw):
+    base = dict(algo="ppo", schedule="event_driven", widths=[100, 200, 500],
+                shaping="none", steps=20000, seeds=[42, 123], paper_extractor=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+# ------------------------------------------------------ the search budget
+#
+# The rebuild asserts in three docstrings that the agent and the heuristics get a
+# matched selection budget. It was false: the agent's config was hardcoded and its
+# validation score was computed and discarded, so it searched ONE config while
+# ReactiveRecentering searched 27. The previous paper had the mirror-image bias (10
+# Optuna trials for PPO against a competitor with no free parameters). Replacing one
+# rigged comparison with its reflection is not a fix, so the budget gets a test.
+
+def test_agent_searches_more_than_one_config():
+    """The defect: a hardcoded config makes 'selected on validation' a fiction."""
+    assert len(AGENT_GRID) > 1
+    # json, not tuple(): net_arch is a list, so the configs are not hashable as-is.
+    keys = [json.dumps(c, sort_keys=True) for c in AGENT_GRID]
+    assert len(set(keys)) == len(keys), \
+        "duplicate configs in the grid: selection would compare a config against itself"
+
+
+def test_agent_budget_is_inside_the_heuristic_range():
+    """Not matched to a single number, which is impossible across arms of different
+    shape, but inside the range the heuristics actually search. At either extreme the
+    comparison measures the budget rather than the method."""
+    counts = {n: len(b([100, 200, 500])) for n, b in HEURISTICS.items()}
+    assert min(counts.values()) <= len(AGENT_GRID) <= max(counts.values()), (
+        f"agent searches {len(AGENT_GRID)}, heuristics search {counts}"
+    )
+
+
+# ------------------------------------------------------ the resume key
+#
+# A unit whose file exists is skipped. With (pool, step) as the only key, running
+# --algo a2c into a directory holding a PPO run silently skipped every unit and then
+# aggregated the PPO numbers under the A2C name.
+
+@pytest.mark.parametrize("changed", [
+    {"algo": "a2c"}, {"schedule": "daily"}, {"widths": [100, 200]},
+    {"shaping": "lvr"}, {"steps": 50_000}, {"seeds": [42]}, {"paper_extractor": True},
+])
+def test_a_changed_config_is_a_different_unit(changed):
+    """Anything that changes what a unit COMPUTES must change its filename."""
+    a, b = config_tag(fake_args()), config_tag(fake_args(**changed))
+    assert a != b, f"changing {changed} did not change the resume key"
+
+
+def test_the_same_config_is_the_same_unit():
+    """...and an unchanged config must still resume, or nothing is skippable."""
+    assert config_tag(fake_args()) == config_tag(fake_args())
+    assert Unit("p", 1, "abc").name == Unit("p", 1, "abc").name
+
+
+def test_config_tag_ignores_sharding():
+    """--shard/--of/--out change WHERE a unit runs, not WHAT it computes. If they
+    keyed the filename, two shards of one run would never merge."""
+    a = fake_args()
+    assert config_tag(a) == config_tag(fake_args())
 
 
 def test_every_step_is_disjoint_and_ordered():

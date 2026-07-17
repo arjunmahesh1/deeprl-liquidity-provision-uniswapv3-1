@@ -48,6 +48,7 @@ write into the same directory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import subprocess
@@ -64,6 +65,24 @@ from .agent_arm import AgentPolicy, score_agent, train_env
 from .bakeoff import WINDOW, Split, build_env, load_panel, score
 
 N_TRAIN, N_VAL = 4, 1
+
+# The agent's search budget, selected on validation like every heuristic arm.
+#
+# Sized against what the heuristics actually search under `--widths 100 200 500`:
+# Passive 1, PassiveWidthSweep 3, RecentreWhenOut 3, ILMinimizer 4,
+# VolProportionalWidth 10, ReactiveRecentering 27. Eight puts the agent inside that
+# range rather than at either extreme. It is NOT free: every config is fit per seed
+# per rolling step per pool, so 8 x 2 x 24 x 6 = 2,304 fits before the refits.
+#
+# `net_arch` spans the previous paper's Optuna-selected [4, 2] against a
+# conventional [64, 64], because the two differ by ~3 orders of magnitude in
+# capacity and the paper's choice is not obviously right for this state.
+AGENT_GRID = [
+    dict(learning_rate=lr, ent_coef=ec, net_arch=na)
+    for lr in (3e-4, 1e-3)
+    for ec in (0.0, 0.01)
+    for na in ([4, 2], [64, 64])
+]
 
 HEURISTICS = {
     "Passive": lambda w: [B.Passive()],
@@ -89,24 +108,42 @@ def rolling_steps(n_windows: int, n_train: int = N_TRAIN, n_val: int = N_VAL) ->
     return steps
 
 
+def config_tag(args) -> str:
+    """A short stable hash of everything that changes what a unit COMPUTES.
+
+    The resume key used to be (pool, step) alone. Because a unit whose file exists is
+    skipped, running `--algo a2c` into a directory that already held a PPO run
+    silently skipped every unit and then aggregated the PPO results under the A2C
+    name. Changing `--widths`, `--schedule`, `--shaping` or `--steps` did the same,
+    only worse: the directory ends up holding a mix that `aggregate` pools into one
+    table without noticing. The config now keys the filename, so a changed config is
+    a different unit rather than a silent no-op.
+    """
+    payload = json.dumps({k: v for k, v in sorted(vars(args).items())
+                          if k in ("algo", "schedule", "widths", "shaping", "steps",
+                                   "seeds", "paper_extractor")}, default=str)
+    return hashlib.sha1(payload.encode()).hexdigest()[:8]
+
+
 @dataclass(frozen=True)
 class Unit:
     """One (pool, rolling step). The atom of work, identical on any machine."""
     pool: str
     step: int
+    tag: str = "untagged"
 
     @property
     def name(self) -> str:
-        return f"{self.pool}__step{self.step:03d}"
+        return f"{self.pool}__step{self.step:03d}__{self.tag}"
 
 
-def work_units(pools: list[str]) -> list[Unit]:
+def work_units(pools: list[str], tag: str = "untagged") -> list[Unit]:
     """Every unit, in a deterministic order, so `--shard i --of n` means the same
     thing on the laptop and on the cluster."""
     out = []
     for key in sorted(pools):
         for s in range(len(rolling_steps(len(load_panel(key)) // WINDOW))):
-            out.append(Unit(key, s))
+            out.append(Unit(key, s, tag))
     return out
 
 
@@ -144,26 +181,59 @@ def heuristic_step(key, split, widths, candidates):
     return dict(test=r, val=best_v, name=best.name, n_actions=n_act)
 
 
-def agent_step(key, split, widths, algo, schedule, steps, seeds, shaping):
-    """Fit on this step's train block, score once on its test window.
+def agent_step(key, split, widths, algo, schedule, steps, seeds, shaping,
+               paper_extractor=False):
+    """Select a config on validation, refit on train+val, score once on test.
+
+    Two defects this replaces, both of which rigged the comparison AGAINST the agent
+    while `bakeoff` and `agent_arm` asserted the budgets were matched:
+
+    1. The config was hardcoded (`learning_rate=3e-4, ent_coef=0.01`) and the
+       validation score was computed and then DISCARDED. The agent searched exactly
+       ONE configuration while `ReactiveRecentering` searched 27 and the heuristics
+       searched 48 between them. The previous paper had the opposite bias (10 Optuna
+       trials for PPO against a competitor with no free parameters at all); replacing
+       one rigged comparison with its mirror image is not a fix.
+
+    2. The agent fit on `train` only, so its data ended one window BEFORE its test
+       window, while every heuristic selected on `val`, i.e. right up to the test
+       boundary. Under this project's own diagnosis, that a regime shift between
+       selection and test is what breaks a learned policy, that asymmetry pointed
+       straight at the result. Refitting on train+val after selection costs nothing,
+       restores the previous paper's 7,500h fitting block, and puts both arms'
+       information on the same footing.
 
     Refit from scratch every step: carrying weights forward would make the effective
     training set the whole history and quietly undo the walk-forward.
     """
-    models, vals = [], []
+    # --- select on validation. Test is not reachable from this loop. -----------
+    best_cfg, best_v = None, -np.inf
+    for cfg in AGENT_GRID:
+        vals = []
+        for s in seeds:
+            env = train_env(key, widths, split, schedule, reward_shaping=shaping)
+            m = make_agent(algo, env, seed=s, paper_extractor=paper_extractor, **cfg)
+            m.learn(total_timesteps=steps)
+            vals.append(float(score_agent(key, m, widths, split.val, schedule).mean()))
+        v = float(np.mean(vals))
+        if v > best_v:
+            best_cfg, best_v = cfg, v
+
+    # --- refit on train+val with the chosen config, then read test ONCE --------
+    fit = Split(train=split.train + split.val, val=split.val, test=split.test)
+    models = []
     for s in seeds:
-        env = train_env(key, widths, split, schedule, reward_shaping=shaping)
-        m = make_agent(algo, env, seed=s, learning_rate=3e-4, ent_coef=0.01)
+        env = train_env(key, widths, fit, schedule, reward_shaping=shaping)
+        m = make_agent(algo, env, seed=s, paper_extractor=paper_extractor, **best_cfg)
         m.learn(total_timesteps=steps)
         models.append(m)
-        vals.append(float(score_agent(key, m, widths, split.val, schedule).mean()))
     # Seeds are averaged on TEST, not argmaxed: picking the best seed by test reward
     # is the previous paper's max-over-trials leak wearing a different hat.
     per_seed = [score_agent(key, m, widths, split.test, schedule) for m in models]
     e = build_env(key, split.test[0], widths, schedule=schedule)
     n_act = score(e, AgentPolicy(models[0], "a"))[1] if e is not None else 0
     return dict(test=float(np.mean([p.mean() for p in per_seed])),
-                val=float(np.mean(vals)), name=f"{algo}/{shaping}", n_actions=n_act)
+                val=best_v, name=f"{algo}/{shaping}/{best_cfg}", n_actions=n_act)
 
 
 def run_unit(unit: Unit, args) -> dict:
@@ -176,7 +246,7 @@ def run_unit(unit: Unit, args) -> dict:
             arms[name] = r
     arms[args.algo.upper()] = agent_step(unit.pool, split, args.widths, args.algo,
                                          args.schedule, args.steps, args.seeds,
-                                         args.shaping)
+                                         args.shaping, args.paper_extractor)
     return {"unit": asdict(unit), "split": {"train": split.train, "val": split.val,
                                             "test": split.test},
             "arms": arms, "provenance": provenance(args)}
@@ -243,6 +313,8 @@ def main():
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--seeds", nargs="*", type=int, default=[42, 123])
     ap.add_argument("--shaping", default="none", choices=["none", "shadow", "lvr"])
+    ap.add_argument("--paper-extractor", action="store_true",
+                    help="use the previous paper's BatchNorm feature extractor")
     ap.add_argument("--out", type=Path, required=True, help="run directory for unit results")
     ap.add_argument("--shard", type=int, default=0, help="this shard's index")
     ap.add_argument("--of", type=int, default=1, help="total shards")
@@ -250,7 +322,7 @@ def main():
     ap.add_argument("--force", action="store_true", help="recompute units already on disk")
     args = ap.parse_args()
 
-    units = work_units(args.pools)
+    units = work_units(args.pools, config_tag(args))
     if args.aggregate:
         aggregate(args.out, units)
         return
