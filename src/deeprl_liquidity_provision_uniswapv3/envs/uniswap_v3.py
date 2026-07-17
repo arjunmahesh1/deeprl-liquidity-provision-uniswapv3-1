@@ -87,12 +87,14 @@ class UniswapV3Env(gym.Env):
         fee_model: str = "per_swap",
         capital_usd: float = 30_000.0,
         gas_usd: float | np.ndarray = 5.0,
-        allow_exit: bool = True,
-        features: str = "compact",
+        allow_exit: bool = False,
+        features: str = "legacy",
+        width_units: str = "spacing",
+        cost_channel: str = "reward",
         shaped_reward: bool = False,      # deprecated alias for reward_shaping="shadow"
         reward_shaping: str = "none",
-        swap_fee_frac: float | None = None,
-        slippage_frac: float = 0.0005,
+        swap_fee_frac: float = 0.0,
+        slippage_frac: float = 0.0,
         ma_windows: tuple[int, ...] = (24, 168),
         warmup: int = 168,
     ):
@@ -153,6 +155,21 @@ class UniswapV3Env(gym.Env):
         if features not in ("compact", "legacy"):
             raise ValueError(f"features must be compact|legacy, got {features!r}")
         self.features = features
+        if width_units not in ("spacing", "ticks"):
+            raise ValueError(f"width_units must be spacing|ticks, got {width_units!r}")
+        self.width_units = width_units
+        # WHERE a cost is charged. Both channels charge it exactly once; charging it in
+        # both is the double-count this env used to have.
+        #   "reward" (default, the previous paper's): position value stays gross, gas
+        #            is subtracted in the reward. custom_env.py: reward = -gas_fee +
+        #            fees - il_penalty, and the position is never debited.
+        #   "value":  costs come out of the position, so they compound against the
+        #            capital that remains, and the reward is fee - d_il alone.
+        # "value" is arguably better economics. "reward" is what the paper did, and
+        # matching it is worth more than improving it here.
+        if cost_channel not in ("reward", "value"):
+            raise ValueError(f"cost_channel must be reward|value, got {cost_channel!r}")
+        self.cost_channel = cost_channel
         # "hourly" is kept only to measure what the discretization was worth; it is
         # a known-biased model and must never be the arm a claim rests on.
         if fee_model not in ("per_swap", "hourly"):
@@ -168,8 +185,14 @@ class UniswapV3Env(gym.Env):
 
         self.capital_usd = float(capital_usd)
         self.gas_usd = gas_usd
-        # A rebalance swaps roughly half the position through the pool itself.
-        self.swap_fee_frac = self.fee_rate if swap_fee_frac is None else float(swap_fee_frac)
+        # A rebalance really does swap ~half the position, but the previous paper
+        # charged NO swap or slippage cost, only flat gas. Both default to 0 to match
+        # it: a real cost the paper omitted is still a change to the problem, not a bug
+        # fix, and switching it on makes a rebalance ~4x more expensive than the
+        # published setup (~$16.50 on $30k against $5 gas), which moves the optimum
+        # toward acting less. Set swap_fee_frac=fee_rate and slippage_frac=5e-4 to
+        # price rebalancing realistically; report it as an extension, not as the paper.
+        self.swap_fee_frac = float(swap_fee_frac)
         self.slippage_frac = float(slippage_frac)
         self.warmup = int(warmup)
 
@@ -204,9 +227,27 @@ class UniswapV3Env(gym.Env):
         if self.features == "legacy":
             from .features import legacy_series
             self.leg = legacy_series(self.price)
-        r = pd.Series(self.price).pct_change().fillna(0.0)
+        p = pd.Series(self.price)
+        r = p.pct_change().fillna(0.0)
         self.ret = r.to_numpy()
-        self.mas = [r.rolling(w, min_periods=1).mean().to_numpy() for w in ma_windows]
+        # Two moving-average series, because the two feature sets want different
+        # things and conflating them silently mis-specified the legacy state:
+        #   price_mas  rolling mean of the PRICE      -> what custom_env.py:132 fed
+        #              the previous agent (`market_data.rolling(24).mean()`), on the
+        #              order of the price itself (~2,000)
+        #   ret_mas    rolling mean of RETURNS        -> what the compact state wants,
+        #              on the order of 1e-4
+        # They differ by ~3 orders of magnitude. `legacy` used to be handed the return
+        # means while claiming to replicate the paper's state, so the "legacy features
+        # are worth +381" ablation never measured the paper's agent.
+        self.price_mas = [p.rolling(w, min_periods=1).mean().to_numpy() for w in ma_windows]
+        self.ret_mas = [r.rolling(w, min_periods=1).mean().to_numpy() for w in ma_windows]
+        self.mas = self.ret_mas          # kept: the compact state's name for them
+        # Likewise volatility. The previous env used an EWM std of LOG returns with
+        # alpha=0.05 (custom_env.py:122); the compact state uses a 24h rolling std of
+        # simple returns.
+        lr = np.log(p / p.shift(1)).fillna(0.0)
+        self.ew_sigma = lr.ewm(alpha=0.05, adjust=True).std().fillna(0.0).to_numpy()
         self.vol = r.rolling(24, min_periods=2).std().fillna(0.0).to_numpy()
         self.n = len(df)
         if self.n <= self.warmup + 2:
@@ -349,11 +390,18 @@ class UniswapV3Env(gym.Env):
 
     def _set_range(self, i: int, width: float, value_usd: float) -> None:
         centre = np.round(self.tick[i] / self.tick_spacing) * self.tick_spacing
-        # The half-width snaps to the tick spacing too, not just the centre: a
-        # position may only be minted on initializable ticks, so at the 0.30% tier
-        # (spacing 60) a 100-tick half-width is not a position anyone could open.
-        w = max(np.round(width / self.tick_spacing) * self.tick_spacing, self.tick_spacing)
+        # `width_units="spacing"` is the previous paper's convention and the default:
+        # an action is a multiple of the pool's tick spacing, not a raw tick count.
+        #     tl, tu = m - self.d * self.w, m + self.d * self.w      custom_env.py:292
+        # with d = 10 at the 0.05% tier, so its action 45 is 450 ticks = +/-4.60%, NOT
+        # 45 ticks = +/-0.45%. Reading that grid as raw ticks understates their bands
+        # by 10x, and an earlier version of this file did exactly that and then blamed
+        # the paper for the degenerate result it produced. The convention also snaps
+        # to mintable ticks for free, since d*w is always a multiple of d.
+        w = width * self.tick_spacing if self.width_units == "spacing" else width
+        w = max(np.round(w / self.tick_spacing) * self.tick_spacing, self.tick_spacing)
         self.tick_lower, self.tick_upper = centre - w, centre + w
+        self.w_action = float(width)      # the raw action, for the legacy state
         self.sqrtA = tick_to_sqrt_price(self.tick_lower)
         self.sqrtB = tick_to_sqrt_price(self.tick_upper)
         self.L = self._liquidity_for_value(value_usd, i, self.sqrtA, self.sqrtB)
@@ -370,6 +418,7 @@ class UniswapV3Env(gym.Env):
         self.L = 0.0
         self.sqrtA = self.sqrtB = 0.0
         self.tick_lower = self.tick_upper = 0.0
+        self.w_action = 0.0
         w0 = float(self.action_widths[0])
         sqrtP0 = self.sqrtP[self.i]
         sA, sB = tick_to_sqrt_price(self.tick[self.i] - w0), tick_to_sqrt_price(self.tick[self.i] + w0)
@@ -433,15 +482,30 @@ class UniswapV3Env(gym.Env):
         return np.asarray(feats, dtype=np.float32)
 
     def _obs_legacy(self) -> np.ndarray:
-        """The rejected paper's exact state vector, in its order."""
+        """The previous paper's state vector, in its order and on its scales.
+
+        Faithful to `custom_env.py:428-431`, which is what the previous agent actually
+        saw. Note the paper's TEXT describes a different vector (a one-step return, an
+        EWMA of returns, the interval bounds, the relative position within it, and the
+        fee tier); none of those are in its code, and 9 of these 13 are in its code but
+        not its text. This follows the code.
+
+        The scales here are wild on purpose: raw price (~2,000) next to raw liquidity
+        next to ADXR. That is why the previous agent's first layer was a BatchNorm
+        (see agents/extractors.py). Feeding this to a default MlpPolicy is not the
+        previous paper's agent.
+        """
         i = self.i
         feats = [
             self.price[i],
             self.tick[i],
-            self.tick_upper - self.tick_lower,
+            # The raw action integer, which is what the previous env carried in `w`,
+            # NOT the tick span it implies. Under width_units="spacing" the span is
+            # w * tick_spacing, so passing the span here would be off by 10x or 60x.
+            self.w_action,
             self.L,
-            self.vol[i],
-            self.mas[0][i], self.mas[1][i],
+            self.ew_sigma[i],                       # EWM std of LOG returns, alpha=0.05
+            self.price_mas[0][i], self.price_mas[1][i],   # means of PRICE, not returns
             self.leg["bb_upper"][i], self.leg["bb_middle"][i], self.leg["bb_lower"][i],
             self.leg["adxr"][i], self.leg["bop"][i], self.leg["dx"][i],
         ]
@@ -459,7 +523,9 @@ class UniswapV3Env(gym.Env):
             self.L = 0.0
             gas_cost = float(self.gas[i])
             v = self._usd(self.out0, self.out1, i)
-            self.out0, self.out1 = self._scale_to_value(self.out0, self.out1, v - gas_cost, i)
+            if self.cost_channel == "value":
+                self.out0, self.out1 = self._scale_to_value(self.out0, self.out1,
+                                                            v - gas_cost, i)
             self.n_exits += 1
 
         elif a >= self._a_enter0:
@@ -468,8 +534,10 @@ class UniswapV3Env(gym.Env):
             gas_cost = float(self.gas[i])
             # Reaching the ratio a range needs means swapping ~half the position,
             # whether we are entering from tokens or recentring an existing range.
+            # Zero by default: the previous paper charged gas alone.
             swap_cost = 0.5 * v * (self.swap_fee_frac + self.slippage_frac)
-            self._set_range(i, width, max(v - gas_cost - swap_cost, 0.0))
+            debit = (gas_cost + swap_cost) if self.cost_channel == "value" else 0.0
+            self._set_range(i, width, max(v - debit, 0.0))
             self.n_rebalances += 1
 
         self.cum_gas += gas_cost
@@ -499,14 +567,18 @@ class UniswapV3Env(gym.Env):
         d_il = il_total - self.prev_il
         self.prev_il = il_total
 
-        # Costs are NOT subtracted here. They are already paid: acting deducted them
-        # from the position's value, so they arrive through `d_il` on this very step.
-        # Subtracting them again charged every cost twice, and the double charge fell
-        # only on strategies that act, which is every arm except passive. Fees are
-        # paid out rather than reinvested, so the episode identity is
-        #     sum(reward) == cum_fees - (IL_final - IL_at_entry)
+        # Charge each cost EXACTLY ONCE, through whichever channel is configured.
+        # This env used to do both: acting deducted the cost from the position's value,
+        # so it came back through `d_il` on the same step, AND the reward subtracted it
+        # again. The double charge scaled with how often a strategy acted, so it taxed
+        # every active arm and left passive, the benchmark, untouched.
+        #   "reward" (paper): value stays gross, cost is subtracted here.
+        #   "value":          cost already left the position, so it is not subtracted.
+        # Fees are paid out rather than reinvested, so the episode identity is
+        #     sum(reward) == cum_fees - (IL_final - IL_at_entry) - costs_charged_here
         # and that is what `test_reward_sums_to_fees_minus_il` holds it to.
-        reward = fee - d_il
+        charged = (gas_cost + swap_cost) if self.cost_channel == "reward" else 0.0
+        reward = fee - d_il - charged
         reward_true = reward
 
         # Loss versus rebalancing: hold the post-action amounts for one step and mark

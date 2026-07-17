@@ -1,10 +1,10 @@
 #!/bin/bash
 # Push code and the processed panel to DCC. Pull results back.
 #
-# Needs the multiplexed SSH master to be open, which needs a real terminal because
-# Duke enforces Duo MFA even with keys. Open it once with `ssh dcc` in Terminal
-# (NetID password, then 1 for a Duo push); it persists for 8h and everything here
-# reuses it without another prompt.
+# Needs a multiplexed SSH master to be open. If your cluster enforces MFA, that first
+# connection needs a real terminal, so open it yourself once (`ssh <host>`); with
+# ControlMaster/ControlPersist configured in ~/.ssh/config it then persists and
+# everything here reuses it without another prompt.
 #
 #   ./scripts/sync_to_dcc.sh push      code + data/processed  (~541MB the first time)
 #   ./scripts/sync_to_dcc.sh pull      outputs/ back here
@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-REMOTE=dcc
-PROJECT=/hpc/group/darec/ab978/deeprl-liquidity-provision-uniswapv3
+REMOTE=${REMOTE_HOST:-dcc}          # an ssh alias in your ~/.ssh/config
+PROJECT=${REMOTE_PROJECT:?set REMOTE_PROJECT to the project path on the cluster}
 LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # macOS ships openrsync (protocol 29), which has no --info=progress2 and no
@@ -30,7 +30,7 @@ fi
 
 if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" true 2>/dev/null; then
   echo "cannot reach $REMOTE. The SSH master is closed or expired (>8h)." >&2
-  echo "Open it yourself in a terminal:  ssh dcc   (NetID password, then 1 for Duo)" >&2
+  echo "Open the master yourself in a terminal:  ssh $REMOTE" >&2
   exit 1
 fi
 
@@ -46,7 +46,7 @@ case "${1:-}" in
     echo "--- panel (only what changed) ---"
     rsync $RSYNC_FLAGS "$LOCAL/data/processed/" "$REMOTE:$PROJECT/data/processed/"
     echo "--- env check ---"
-    ssh "$REMOTE" "test -x /hpc/group/darec/ab978/miniconda3/envs/deeprl-uniswap/bin/python3 \
+    ssh "$REMOTE" "test -x ${REMOTE_CONDA:?}/envs/deeprl-uniswap/bin/python3 \
       && echo 'env deeprl-uniswap: present' \
       || echo 'env deeprl-uniswap: MISSING -> conda env create -f $PROJECT/environment.yml'"
     ;;
@@ -55,7 +55,7 @@ case "${1:-}" in
     rsync $RSYNC_FLAGS "$REMOTE:$PROJECT/outputs/" "$LOCAL/outputs/"
     ;;
   status)
-    ssh "$REMOTE" "squeue -u ab978 -o '%.10i %.9P %.20j %.2t %.10M %.6D %R' | head -20; \
+    ssh "$REMOTE" "squeue -u $USER -o '%.10i %.9P %.20j %.2t %.10M %.6D %R' | head -20; \
       echo '--- work units landed ---'; \
       for d in $PROJECT/outputs/*/; do \
         [ -d \"\$d\" ] && echo \"\$(basename \$d): \$(ls \$d/*.json 2>/dev/null | wc -l) units\"; \

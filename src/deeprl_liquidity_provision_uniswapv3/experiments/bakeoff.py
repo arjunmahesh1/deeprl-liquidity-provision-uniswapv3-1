@@ -35,6 +35,12 @@ PANEL = Path(__file__).resolve().parents[3] / "data/processed"
 WINDOW = 1500
 WARMUP = 168
 FEE_MODEL = "per_swap"
+# A FIXED USD base, deliberately unlike the previous paper. Its configs set `x: 10`
+# WETH (~$40k) on one pool and `x: 0.15` WBTC (~$6-10k) on another, and its text claims
+# `x_0 = 2`, matching neither. A per-pool base that also drifts with price makes the
+# cross-pool reward levels in its Tab. IV/V incomparable, and comparing pools is the
+# paper's whole point. Recorded in DIVERGENCES.md as a deliberate fix, not an oversight.
+CAPITAL_USD = 30_000.0
 
 
 @lru_cache(maxsize=None)
@@ -89,7 +95,7 @@ def make_split(n_windows: int, frac_train=0.5, frac_val=0.25) -> Split:
 
 
 def build_env(key: str, w_index: int, widths, schedule: str | None = None,
-              features: str = "compact", **_ignored):
+              features: str = "legacy", **_ignored):
     """Native hourly env. Competitors run unwrapped and decide for themselves when to
     act, which is what makes them distinct strategies. `schedule` is only for an
     agent, which has no timing of its own."""
@@ -99,9 +105,11 @@ def build_env(key: str, w_index: int, widths, schedule: str | None = None,
     seg = df.iloc[lo:lo + WINDOW].reset_index(drop=True)
     if len(seg) < WINDOW:
         return None
+    # Defaults are the previous paper's: legacy state, widths in units of tick
+    # spacing, gas charged in the reward, no swap/slippage, no exit.
     env = UniswapV3Env(seg, swaps=window_swaps(key, seg), fee_model=FEE_MODEL,
                        fee_tier_pct=p.fee_tier_pct, action_widths=np.asarray(widths),
-                       dec0=p.dec0, dec1=p.dec1, capital_usd=30_000.0, gas_usd=5.0,
+                       dec0=p.dec0, dec1=p.dec1, capital_usd=CAPITAL_USD, gas_usd=5.0,
                        warmup=WARMUP, allow_exit=False, features=features)
     return env if schedule is None else agent_schedule(env, schedule)
 
@@ -155,7 +163,7 @@ def evaluate_on_test(key, policy, widths, split, **kw):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pools", nargs="*", default=[k for k, p in POOLS.items() if p.group == "core"])
-    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500, 2000])
+    ap.add_argument("--widths", nargs="*", type=float, default=[45, 50, 55])
     ap.add_argument("--agent-schedule", default="daily",
                     choices=["hourly", "daily", "weekly", "event_driven"],
                     help="the AGENT's declared decision frequency; competitors run native")

@@ -220,7 +220,11 @@ def agent_step(key, split, widths, algo, schedule, steps, seeds, shaping,
             best_cfg, best_v = cfg, v
 
     # --- refit on train+val with the chosen config, then read test ONCE --------
-    fit = Split(train=split.train + split.val, val=split.val, test=split.test)
+    # val is EMPTY here, not repeated into val: selection is already done, and a Split
+    # whose train and val overlap is exactly what `Split.__post_init__` exists to
+    # refuse. Reusing the same object for "fit on everything before test" and "select"
+    # is how a leak gets in.
+    fit = Split(train=split.train + split.val, val=[], test=split.test)
     models = []
     for s in seeds:
         env = train_env(key, widths, fit, schedule, reward_shaping=shaping)
@@ -307,7 +311,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pools", nargs="*", default=CORE)
-    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500])
+    ap.add_argument("--widths", nargs="*", type=float, default=[45, 50, 55])
     ap.add_argument("--algo", default="ppo")
     ap.add_argument("--schedule", default="event_driven")
     ap.add_argument("--steps", type=int, default=20_000)

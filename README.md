@@ -1,13 +1,155 @@
-# README
+# RL for active liquidity provision in Uniswap v3
 
-This repository accompanies the paper titled **"Improving DeFi Accessibility through Efficient Liquidity Provisioning with Deep Reinforcement Learning"**, which is currently available on [arXiv](https://arxiv.org/abs/2501.07508).
+Multi-pool benchmarking and transfer learning.
 
-The paper has been accepted for presentation at the **AAAI 2025 Workshop on AI for Social Impact - Bridging Innovations in Finance, Social Media, and Crime Prevention**. More information about the workshop can be found on its official website: [AAAI 2025 AI for Social Impact Workshop](https://sites.google.com/view/aaai-2025-ai-si/home).
+Successor to *"Improving DeFi Accessibility through Efficient Liquidity Provisioning
+with Deep Reinforcement Learning"* ([arXiv 2501.07508](https://arxiv.org/abs/2501.07508),
+AAAI 2025 Workshop on AI for Social Impact).
 
-This repository contains:
+The environment, state, action semantics, reward, and walk-forward training follow the
+earlier work. `SPEC.md` (not in the repo, see below) records the pre-registration, the
+current results, and the full list of changes with their evidence.
 
-- The source code and implementation details for the proposed deep reinforcement learning models.
-- Scripts for data preprocessing and experiments.
-- Results and evaluation metrics used in the paper.
+---
 
-For questions or further information, please refer to the contact details provided in the paper.
+## Setup
+
+```bash
+conda env create -f environment.yml
+conda activate deeprl-uniswap
+pip install -e ".[dev]"           # editable install; no PYTHONPATH needed afterwards
+pytest -q                          # 96 tests, ~2s
+```
+
+TA-Lib needs its C library, which pip cannot install on its own. It comes from
+conda-forge in `environment.yml`; without conda, `brew install ta-lib` first.
+
+## Getting the data
+
+The panel is not in git (458MB). Two options.
+
+**Use the bundle.** Unzip `uniswap_panel.zip` into `data/processed/`. That is all the
+code reads.
+
+```bash
+unzip uniswap_panel.zip -d data/processed/
+```
+
+**Or rebuild it** from raw swap events. Needs the sibling `defi-rv` checkout
+(~4.9GB of raw parquet), which is a prerequisite this repo cannot fetch for you:
+
+```bash
+python -m src.deeprl_liquidity_provision_uniswapv3.data.aggregate   # hourly panel
+python -m src.deeprl_liquidity_provision_uniswapv3.data.swaps       # per-swap fees
+```
+
+Six core pools, 3 asset pairs x 2 fee tiers, 2021-05 to 2026-06, ~44,900 hours each.
+The fee tier is independently recovered from the raw data as a check: `aggregate.py`
+asserts that the median disagreement between a swap's two token legs equals the
+declared tier, on all 12 pools.
+
+## Running experiments
+
+**Several algorithms, the easy way:**
+
+```bash
+./scripts/run_algos.sh                        # ppo a2c dqn qrdqn recurrentppo, 6 pools
+./scripts/run_algos.sh "ppo a2c"              # a subset
+STEPS=50000 ./scripts/run_algos.sh "ppo"      # a longer budget
+POOLS="usdc_weth_005" ./scripts/run_algos.sh "ppo"     # one pool, to try it out
+```
+
+Resumable and shardable. One work unit is one (algorithm, pool, rolling step); it
+writes its own JSON and is skipped if already done. Stop with ctrl-C, rerun, it picks
+up where it stopped. The config keys the filename, so several algorithms share one
+output directory without colliding.
+
+**Splitting across machines:**
+
+```bash
+SHARD=0 OF=8 ./scripts/run_algos.sh           # this machine takes one eighth
+```
+
+Shard *i* names the same units on every machine, so shards merge with no
+reconciliation. Then read whatever has landed:
+
+```bash
+python -m src.deeprl_liquidity_provision_uniswapv3.experiments.rolling \
+       --out outputs/algos_v1 --algo ppo --aggregate
+```
+
+The aggregate reports how many units are missing and refuses to pass a partial table
+off as a finished run.
+
+**On a SLURM cluster:** `scripts/slurm/rolling_array.sh` is a thin array wrapper that
+maps `$SLURM_ARRAY_TASK_ID` onto the same `--shard` index, so there is no
+cluster-only code path. Set the paths at the top of that file and of
+`scripts/sync_to_dcc.sh` for your own account before use.
+
+This is a **CPU** workload. Measured ~6,100 steps/s on CPU; the nets are far too small
+for a GPU to beat kernel-launch overhead, and the env emits float64, which Apple MPS
+cannot take at all. Request CPU nodes.
+
+## The protocol
+
+Walk-forward, with selection carved out of the training block so the test window is
+never a tuning parameter:
+
+```
+train  windows i..i+3    6,000h   fit
+val    window  i+4       1,500h   select the config; test is not reachable from here
+test   window  i+5       1,500h   read once
+                                  refit on train+val, then roll forward one window
+```
+
+Every window is tested exactly once, by a policy fit only on windows preceding it.
+144 window-tests on the core panel. Both arms, learned and heuristic, select on
+validation and read test once.
+
+## Layout
+
+```
+src/deeprl_liquidity_provision_uniswapv3/
+  data/       pools.py (registry), aggregate.py (hourly panel), swaps.py (per-swap fees)
+  envs/       uniswap_v3.py (the MDP), features.py (the 13-feature state), schedule.py
+  agents/     registry.py (5 algorithms), extractors.py (the BatchNorm policy net)
+  policies/   baselines.py (the heuristic strategies)
+  experiments/
+    rolling.py      THE protocol: walk-forward. Start here.
+    bakeoff.py      splits, env construction, scoring
+    agent_arm.py    training envs
+    leaderboard.py, global_rule.py, transfer_strategies.py
+scripts/
+  run_algos.sh      multi-algorithm runner
+  sync_to_dcc.sh    push / pull / status against a SLURM cluster
+  slurm/            array wrappers
+  exhibits/         one script per cited claim in SPEC.md
+tests/              96 tests; the protocol and the accounting are both covered
+rl-code/            the earlier codebase, kept for reference only. Superseded; do not
+                    build on it or on the outputs under rl-code/output/.
+```
+
+## Working documents (not in the repo)
+
+`SPEC.md`, `DIVERGENCES.md`, and `reports/` are deliberately untracked and shared out
+of band. See `.gitignore` for what belongs where and why.
+
+## Algorithms
+
+`registry.py` carries five, all on the same `Discrete` action space so the comparison
+is about the algorithm and not the action space:
+
+| key | notes |
+|---|---|
+| `ppo` | the incumbent |
+| `a2c` | on-policy contrast |
+| `dqn` | off-policy contrast (vanilla DQN with a target network, not Double DQN) |
+| `qrdqn` | distributional (sb3-contrib) |
+| `recurrentppo` | LSTM policy (sb3-contrib) |
+
+SAC and TD3 are deliberately absent: they need a `Box` action space, which is a
+different formulation of the problem.
+
+`--paper-extractor` uses the earlier policy network (BatchNorm -> [4,2] -> 128, tanh)
+instead of the SB3 default MLP. The BatchNorm is load-bearing, because the 13-feature
+state carries raw prices (~2,000) next to raw liquidity (~1e18).

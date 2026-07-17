@@ -155,3 +155,17 @@ dmypy.json
 .DS_Store
 __pycache__/
 *.pyc
+
+# --- internal working documents: never in the repo ---
+# The repo lives on GitHub and was public until 2026-07-17. Anything committed here
+# is reachable forever from every fork in the network, and privatising the parent does
+# NOT retract it from a public fork. These stay on disk and are shared out of band.
+#
+# reports/          correspondence and revision memos. Not ours to publish.
+# DIVERGENCES.md    internal audit notes.
+# SPEC.md           pre-registration and running results.
+# CLAUDE.md         local assistant/project instructions, not part of the project.
+reports/
+DIVERGENCES.md
+SPEC.md
+CLAUDE.md

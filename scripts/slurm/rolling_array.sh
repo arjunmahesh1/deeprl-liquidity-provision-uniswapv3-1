@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=04:00:00
-#SBATCH --output=/hpc/group/darec/ab978/deeprl-liquidity-provision-uniswapv3/slurm_logs/roll_%A_%a.out
-#SBATCH --error=/hpc/group/darec/ab978/deeprl-liquidity-provision-uniswapv3/slurm_logs/roll_%A_%a.err
+#SBATCH --output=slurm_logs/roll_%A_%a.out
+#SBATCH --error=slurm_logs/roll_%A_%a.err
 #
 # Walk-forward rolling windows, as a SLURM array.
 #
@@ -33,10 +33,17 @@
 # Resumable: a unit whose JSON already exists is skipped, so a requeued or preempted
 # task picks up where it stopped rather than redoing the shard.
 
+# NOTE: the #SBATCH lines above are COMMENTS. sbatch parses them itself and the shell
+# never expands them, so a ${VAR} there is a literal and the job dies on an unwritable
+# log path. They must stay relative (resolved against the submit directory) or be
+# hardcoded. Only the lines below this point are shell.
 set -euo pipefail
 
-PROJECT=/hpc/group/darec/ab978/deeprl-liquidity-provision-uniswapv3
-PYTHON=/hpc/group/darec/ab978/miniconda3/envs/deeprl-uniswap/bin/python3
+# Set these for your own account, or export them before sbatch:
+#   PROJECT_ROOT  the project checkout on the cluster
+#   CONDA_PREFIX  the conda env (conda activate sets it for you)
+PROJECT=${PROJECT_ROOT:-$SLURM_SUBMIT_DIR}
+PYTHON=${CONDA_PREFIX:?activate the deeprl-uniswap env before sbatch}/bin/python3
 OUT=${1:-outputs/rolling_v1}
 N_SHARDS=${SLURM_ARRAY_TASK_COUNT:-18}
 

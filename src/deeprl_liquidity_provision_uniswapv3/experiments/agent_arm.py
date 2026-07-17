@@ -25,8 +25,9 @@ from ..agents.registry import make_agent
 from ..data.pools import POOLS
 from ..envs.schedule import agent_schedule
 from ..policies import baselines as B
-from .bakeoff import (FEE_MODEL, PANEL, WINDOW, build_env, evaluate_on_test, load_panel,
-                      make_split, score, select_on_val, window_swaps)
+from .bakeoff import (CAPITAL_USD, FEE_MODEL, PANEL, WINDOW, build_env,
+                      evaluate_on_test, load_panel, make_split, score, select_on_val,
+                      window_swaps)
 
 # Deliberately small and declared up front. The competitors are selected from ~60
 # configurations; a sprawling agent grid would make "matched budget" a fiction in
@@ -40,7 +41,7 @@ PPO_GRID = [
 SEEDS = (42, 123, 256)
 
 
-def train_env(key, widths, split, schedule, features="compact", n_windows=None,
+def train_env(key, widths, split, schedule, features="legacy", n_windows=None,
               reward_shaping="none"):
     """One long episode over the TRAIN windows. Test is unreachable from here.
 
@@ -57,7 +58,7 @@ def train_env(key, widths, split, schedule, features="compact", n_windows=None,
     env = UniswapV3Env(seg, swaps=window_swaps(key, seg), fee_model=FEE_MODEL,
                        fee_tier_pct=p.fee_tier_pct,
                        action_widths=np.asarray(widths), dec0=p.dec0, dec1=p.dec1,
-                       capital_usd=30_000.0, gas_usd=5.0, warmup=168, allow_exit=False,
+                       capital_usd=CAPITAL_USD, gas_usd=5.0, warmup=168, allow_exit=False,
                        features=features, reward_shaping=reward_shaping)
     return Monitor(agent_schedule(env, schedule))
 
@@ -73,7 +74,7 @@ class AgentPolicy:
         return int(self.model.predict(obs, deterministic=True)[0])
 
 
-def score_agent(key, model, widths, w_indices, schedule, features="compact"):
+def score_agent(key, model, widths, w_indices, schedule, features="legacy"):
     out = []
     for wi in w_indices:
         env = build_env(key, wi, widths, schedule=schedule, features=features)
@@ -118,7 +119,7 @@ def run_pool(key, algo, widths, schedule, steps):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pools", nargs="*", default=[k for k, p in POOLS.items() if p.group == "core"])
-    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500, 2000])
+    ap.add_argument("--widths", nargs="*", type=float, default=[45, 50, 55])
     ap.add_argument("--algo", default="ppo")
     ap.add_argument("--schedule", default="daily",
                     choices=["hourly", "daily", "weekly", "event_driven"])

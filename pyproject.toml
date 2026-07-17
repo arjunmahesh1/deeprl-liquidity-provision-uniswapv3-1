@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deeprl-liquidity-provision-uniswapv3"
+version = "0.2.0"
+description = "Reinforcement learning for active liquidity provision in Uniswap v3"
+requires-python = ">=3.11"
+# Versions are pinned here and in environment.yml. rl-code/requirements.txt pinned
+# nothing, and the stable-baselines3 API moves fast enough that this alone may explain
+# why the previous paper's results did not reproduce.
+dependencies = [
+    "numpy>=2.4,<3",
+    "pandas>=3.0,<4",
+    "scipy>=1.17,<2",
+    "pyarrow>=25,<26",
+    "torch==2.12.1",
+    "stable-baselines3==2.9.0",
+    "sb3-contrib==2.9.0",
+    "gymnasium==1.3.0",
+    # TA-Lib is deliberately absent: the pip wrapper needs the C library underneath and
+    # will not build without it. Install it from conda-forge (environment.yml) or with
+    # `brew install ta-lib` first.
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

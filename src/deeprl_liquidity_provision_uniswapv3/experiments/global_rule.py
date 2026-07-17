@@ -40,7 +40,7 @@ def pooled_val_score(keys, splits, pol, widths):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500, 2000])
+    ap.add_argument("--widths", nargs="*", type=float, default=[45, 50, 55])
     ap.add_argument("--algo", default="ppo")
     ap.add_argument("--schedule", default="event_driven")
     ap.add_argument("--steps", type=int, default=20_000)

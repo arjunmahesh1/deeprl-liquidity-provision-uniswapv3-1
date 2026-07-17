@@ -31,7 +31,7 @@ from .bakeoff import PANEL, WINDOW, evaluate_on_test, make_split, select_on_val
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--widths", nargs="*", type=float, default=[100, 200, 500, 2000])
+    ap.add_argument("--widths", nargs="*", type=float, default=[45, 50, 55])
     args = ap.parse_args()
 
     core = [k for k, p in POOLS.items() if p.group == "core"]

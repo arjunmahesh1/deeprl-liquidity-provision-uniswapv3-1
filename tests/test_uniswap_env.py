@@ -82,12 +82,24 @@ ENTER_50 = 2  # first entry in action_widths
 
 def make_env(panel=None, enter=True, **kw):
     """Env at reset is OUT of position. `enter=True` puts it in at the first width,
-    which is the starting point most tests want."""
+    which is the starting point most tests want.
+
+    Every config this fixture depends on is pinned EXPLICITLY, never inherited from
+    the constructor's defaults. The defaults are the previous paper's (legacy state,
+    widths in units of tick spacing, gas charged in the reward), and they are allowed
+    to move as fidelity to the paper improves. A mechanics test that silently rode
+    those defaults would start testing a different environment the moment one changed,
+    which is how `features="legacy"` drifted into not replicating anything.
+    """
     kw.setdefault("fee_tier_pct", 0.05)
     kw.setdefault("action_widths", np.array([50, 200, 1000]))
     kw.setdefault("warmup", 10)
     kw.setdefault("dec0", 6)
     kw.setdefault("dec1", 18)
+    kw.setdefault("features", "compact")     # mechanics, not fidelity
+    kw.setdefault("width_units", "ticks")    # these tests speak in raw ticks
+    kw.setdefault("cost_channel", "value")
+    kw.setdefault("allow_exit", True)
     panel = make_panel() if panel is None else panel
     kw.setdefault("swaps", make_swaps(panel))
     env = UniswapV3Env(panel, **kw)
@@ -95,6 +107,118 @@ def make_env(panel=None, enter=True, **kw):
     if enter:
         env.step(ENTER_50)
     return env
+
+
+# ------------------------------------------ fidelity to the previous paper
+#
+# The defaults ARE the previous paper's setup. The rebuild's job is to fix bugs, not
+# to change the problem, and every one of these drifted at some point.
+
+def paper_env(panel=None, **kw):
+    """The env exactly as the previous paper configured it, defaults untouched."""
+    panel = make_panel() if panel is None else panel
+    kw.setdefault("fee_tier_pct", 0.05)
+    kw.setdefault("action_widths", np.array([45, 50, 55]))
+    return UniswapV3Env(panel, swaps=make_swaps(panel), dec0=6, dec1=18,
+                        warmup=10, **kw)
+
+
+def test_default_state_is_the_papers_13_features():
+    """The paper's agent saw 13 features. `compact` is our invention and must not be
+    the default, or every RL number describes a different agent."""
+    env = paper_env()
+    env.reset()
+    assert env.features == "legacy"
+    assert env.observation_space.shape == (13,)
+
+
+def test_default_action_width_is_a_multiple_of_tick_spacing():
+    """THE 10x error. `tl, tu = m - d*w, m + d*w` with d=10, so action 45 is 450 ticks
+    (+/-4.60%), not 45 ticks (+/-0.45%). Reading the paper's grid as raw ticks
+    understates its bands by 10x, which is exactly what an earlier version of this
+    repo did before blaming the paper for the degenerate result it produced."""
+    env = paper_env()
+    env.reset()
+    env.step(1)                                   # ENTER at action_widths[0] = 45
+    span = env.tick_upper - env.tick_lower
+    assert span == pytest.approx(2 * 45 * 10), f"span {span}, expected 900 ticks"
+    band = 1.0001 ** (span / 2) - 1
+    assert band == pytest.approx(0.0460, abs=5e-4), f"band +/-{band:.2%}, expected +/-4.60%"
+
+
+def test_paper_widths_land_on_mintable_ticks():
+    """d*w is always a multiple of d, so the paper's own convention snaps for free."""
+    for tier, spacing in ((0.05, 10), (0.30, 60)):
+        env = paper_env(fee_tier_pct=tier)
+        env.reset()
+        env.step(1)
+        assert env.tick_lower % spacing == pytest.approx(0.0)
+        assert env.tick_upper % spacing == pytest.approx(0.0)
+
+
+def test_the_same_action_is_a_different_strategy_across_tiers():
+    """Not a defect of ours, a fact about the paper: d=10 vs d=60 means action 45 is
+    +/-4.6% on a 0.05% pool and +/-31% on a 0.30% pool. The paper called this a
+    'misalignment with tick spacing'; it is a different strategy, and it can explain
+    the cross-pool difference the paper attributed to fee regime."""
+    bands = {}
+    for tier in (0.05, 0.30):
+        env = paper_env(fee_tier_pct=tier)
+        env.reset()
+        env.step(1)
+        bands[tier] = 1.0001 ** ((env.tick_upper - env.tick_lower) / 2) - 1
+    assert bands[0.05] == pytest.approx(0.046, abs=5e-4)
+    assert bands[0.30] == pytest.approx(0.31, abs=0.01)
+    assert bands[0.30] / bands[0.05] > 6
+
+
+def test_default_charges_gas_in_the_reward_not_the_position():
+    """The paper's channel: `reward = -gas_fee + fees - il_penalty`, and the position
+    is never debited. Either channel charges once; this one is theirs."""
+    env = paper_env(gas_usd=5.0)
+    env.reset()
+    v_before = env._value_usd(env.L, env.i)
+    _, r, _, _, info = env.step(1)
+    assert info["gas"] == 5.0
+    assert env._value_usd(env.L, env.i) == pytest.approx(v_before, rel=1e-9), \
+        "cost_channel='reward' must leave the position gross"
+    assert r == pytest.approx(info["fee"] - info["d_il"] - 5.0, rel=1e-9)
+
+
+def test_default_charges_no_swap_or_slippage():
+    """The paper charged flat gas alone. A real cost it omitted is still a change to
+    the problem, not a bug fix."""
+    env = paper_env(gas_usd=5.0)
+    env.reset()
+    _, _, _, _, info = env.step(1)
+    assert info["swap_cost"] == 0.0
+
+
+def test_legacy_state_uses_price_means_and_ewm_log_vol():
+    """`legacy` claimed to replicate the paper's state and did not: it fed rolling
+    means of RETURNS where the paper fed rolling means of PRICE (~3 orders of
+    magnitude apart), and a rolling std of simple returns where the paper used an EWM
+    std of LOG returns with alpha=0.05."""
+    panel = make_panel(n=300, drift=0.0, vol=0.01, seed=2)
+    env = paper_env(panel=panel)
+    env.reset()
+    obs, _, _, _, _ = env.step(0)
+    i = env.i
+    p = pd.Series(panel["price"].to_numpy())
+    assert obs[5] == pytest.approx(p.rolling(24, min_periods=1).mean().to_numpy()[i], rel=1e-4)
+    assert obs[6] == pytest.approx(p.rolling(168, min_periods=1).mean().to_numpy()[i], rel=1e-4)
+    lr = np.log(p / p.shift(1)).fillna(0.0)
+    assert obs[4] == pytest.approx(lr.ewm(alpha=0.05, adjust=True).std().to_numpy()[i], rel=1e-4)
+    # ...and the means must be on the PRICE's scale, not a return's
+    assert obs[5] > 100, "ma24 is a return mean, not a price mean"
+
+
+def test_legacy_state_carries_the_raw_action_not_the_tick_span():
+    """The paper's `w` is the action integer (45), not the span it implies (900)."""
+    env = paper_env()
+    env.reset()
+    obs, _, _, _, _ = env.step(1)          # ENTER at 45
+    assert obs[2] == pytest.approx(45.0), f"expected the raw action 45, got {obs[2]}"
 
 
 # --------------------------------------------------------------- unit safety
@@ -146,7 +270,9 @@ def test_exit_stops_fees_and_costs_gas_only():
 
 
 def test_enter_costs_gas_and_swap():
-    env = make_env(enter=False)
+    # swap/slippage are OFF by default, because the previous paper charged gas alone.
+    # Ask for them explicitly to test that they are charged when configured.
+    env = make_env(enter=False, swap_fee_frac=0.0005, slippage_frac=0.0005)
     _, _, _, _, info = env.step(ENTER_50)
     assert info["gas"] > 0 and info["swap_cost"] > 0
     assert info["in_position"]
@@ -337,14 +463,14 @@ def test_rebalance_conserves_value_net_of_costs():
 
 
 def test_rebalance_costs_gas_and_swap():
-    env = make_env(gas_usd=5.0)
+    env = make_env(gas_usd=5.0, swap_fee_frac=0.0005, slippage_frac=0.0005)
     v0 = env._value_usd(env.L, env.i)
     _, _, _, _, info = env.step(ENTER_50)
     assert info["gas"] == 5.0
     assert info["swap_cost"] > 0
     assert env._value_usd(env.L, env.i) < v0
 
-    hold = make_env(gas_usd=5.0)
+    hold = make_env(gas_usd=5.0, swap_fee_frac=0.0005, slippage_frac=0.0005)
     _, _, _, _, info_hold = hold.step(HOLD)
     assert info_hold["gas"] == 0.0, "holding must never pay gas"
 
