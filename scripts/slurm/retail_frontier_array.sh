@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=uniswap-retail
-#SBATCH --partition=compsci
 #SBATCH --requeue
 #SBATCH --array=0-35
 #SBATCH --cpus-per-task=2

@@ -70,6 +70,9 @@ This frontier therefore does two useful things:
 ## Artifacts
 
 - Machine-readable results: `outputs/retail_frontier_v1/aggregate_block4/frontier.csv`
+- Regenerated headline counts:
+  `outputs/retail_frontier_v1/significance_summary.csv`, produced by
+  `python -m src.deeprl_liquidity_provision_uniswapv3.experiments.retail_frontier_summary`
 - Dependence checks: adjacent `aggregate_block2`, `block6`, and `block8` directories
 - Audit: `outputs/retail_frontier_v1/audit.json`
 - Figure: `reports/figures/retail-viability-frontier.{pdf,png}`

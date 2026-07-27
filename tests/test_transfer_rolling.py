@@ -27,6 +27,11 @@ def test_transfer_config_tag_changes_with_every_computational_setting():
         assert T.config_tag(args(**changed)) != base
 
 
+def test_transfer_integer_and_float_widths_share_a_resume_key():
+    assert T.config_tag(args(widths=[45, 50, 55])) == \
+        T.config_tag(args(widths=[45.0, 50.0, 55.0]))
+
+
 def test_one_unit_trains_source_only_and_scores_each_target_test(monkeypatch):
     seen = []
 
@@ -66,9 +71,22 @@ def test_partial_transfer_collection_is_never_reported_final(tmp_path):
     assert not (tmp_path / "report").exists()
 
 
+def test_transfer_step_count_is_dynamic_but_must_align():
+    aligned = [
+        T.Unit(CORE[0], step, "abc") for step in (0, 1)
+    ] + [
+        T.Unit(CORE[1], step, "abc") for step in (0, 1)
+    ]
+    assert T._aligned_steps(aligned) == [0, 1]
+
+    unaligned = aligned[:-1]
+    with np.testing.assert_raises_regex(ValueError, "aligned step indices"):
+        T._aligned_steps(unaligned)
+
+
 def test_slurm_transfer_wrapper_is_cpu_resumable_array():
     body = (Path(__file__).resolve().parents[1] / "scripts/slurm/transfer_array.sh").read_text()
-    assert "#SBATCH --partition=compsci" in body
+    assert "#SBATCH --partition=" not in body
     assert "#SBATCH --array=0-17" in body
     assert "PYTHONNOUSERSITE=1" in body
     assert "transfer_rolling" in body

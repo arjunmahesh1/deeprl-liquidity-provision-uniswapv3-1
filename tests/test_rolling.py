@@ -14,7 +14,7 @@ import json  # noqa: E402
 import numpy as np  # noqa: E402
 
 from src.deeprl_liquidity_provision_uniswapv3.experiments.rolling import (  # noqa: E402
-    AGENT_GRID, HEURISTICS, N_TRAIN, N_VAL, Unit, _block_bootstrap_mean,
+    AGENT_GRID, HEURISTICS, N_TRAIN, N_VAL, Unit, _block_bootstrap_mean, _report_pool,
     config_tag, grid_for, holm_adjust, paired_block_inference, rolling_steps,
 )
 
@@ -107,6 +107,16 @@ def test_the_same_config_is_the_same_unit():
     assert Unit("p", 1, "abc").name == Unit("p", 1, "abc").name
 
 
+def test_integer_and_float_widths_share_a_resume_key():
+    assert config_tag(fake_args(widths=[45, 50, 55])) == \
+        config_tag(fake_args(widths=[45.0, 50.0, 55.0]))
+    assert config_tag(fake_args(
+        widths=[45, 50, 55], execution_widths=[480, 540, 600]
+    )) == config_tag(fake_args(
+        widths=[45.0, 50.0, 55.0], execution_widths=[480.0, 540.0, 600.0]
+    ))
+
+
 def test_run_and_aggregate_agree_on_the_config():
     """The runner must pass the SAME config args to the run and to the aggregate.
 
@@ -128,10 +138,10 @@ def test_run_and_aggregate_agree_on_the_config():
     assert "--aggregate" in body
 
 
-def test_slurm_wrapper_uses_live_cpu_partition_and_explicit_algorithm():
+def test_slurm_wrapper_leaves_partition_to_the_submitting_cluster():
     sh = Path(__file__).resolve().parents[1] / "scripts/slurm/rolling_array.sh"
     body = sh.read_text()
-    assert "#SBATCH --partition=compsci" in body
+    assert "#SBATCH --partition=" not in body
     assert "ALGO=${2:-ppo}" in body
     assert '--algo "$ALGO"' in body
     assert "SCHEDULE=${3:-event_driven}" in body
@@ -146,6 +156,22 @@ def test_slurm_wrapper_uses_live_cpu_partition_and_explicit_algorithm():
     assert body.index("EXTRA=()") < body.index('EXTRA+=(--execution-widths'), (
         "execution-width arguments must be appended after EXTRA is initialized"
     )
+
+
+def test_rolling_aggregate_labels_test_selected_p_values(capsys):
+    rows = [
+        {"unit": {"step": step},
+         "arms": {
+             "Passive": {"test": float(step), "n_actions": 0},
+             "PPO": {"test": float(step + 1), "n_actions": 1},
+         }}
+        for step in range(4)
+    ]
+    _report_pool("pool", rows, 4, 1, 100, 2)
+    output = capsys.readouterr().out
+    assert "EXPLORATORY DIAGNOSTIC — DO NOT QUOTE THESE P-VALUES" in output
+    assert "test-selected" in output
+    assert "Use combined.py" in output
 
 
 def test_cluster_sync_keeps_the_source_data_package():

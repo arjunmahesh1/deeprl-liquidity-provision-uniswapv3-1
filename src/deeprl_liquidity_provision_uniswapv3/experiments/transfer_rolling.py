@@ -23,14 +23,16 @@ from ..agents.registry import make_agent
 from ..data.pools import CORE, POOLS
 from .agent_arm import score_agent, train_env
 from .bakeoff import Split, load_panel
-from .rolling import (grid_for, holm_adjust, paired_block_inference,
+from .rolling import (canonical_widths, grid_for, holm_adjust, paired_block_inference,
                       rolling_steps)
 
 
 def config_tag(args) -> str:
     keys = ("algo", "widths", "schedule", "steps", "seeds", "shaping",
             "paper_extractor")
-    payload = json.dumps({k: getattr(args, k) for k in keys}, sort_keys=True)
+    values = {k: getattr(args, k) for k in keys}
+    values["widths"] = canonical_widths(values["widths"])
+    payload = json.dumps(values, sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()[:8]
 
 
@@ -114,6 +116,23 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def _aligned_steps(expected: list[Unit]) -> list[int]:
+    """Return actual step indices, refusing unpaired source timelines."""
+    by_source: dict[str, set[int]] = {}
+    for unit in expected:
+        by_source.setdefault(unit.source, set()).add(unit.step)
+    if not by_source:
+        raise ValueError("transfer aggregation has no expected work units")
+    reference = next(iter(by_source.values()))
+    if any(steps != reference for steps in by_source.values()):
+        counts = {source: len(steps) for source, steps in sorted(by_source.items())}
+        raise ValueError(
+            "transfer aggregation requires aligned step indices across sources; "
+            f"got {counts}"
+        )
+    return sorted(reference)
+
+
 def aggregate(out_dir: Path, expected: list[Unit], targets: list[str], report_dir: Path,
               seed: int, samples: int, block: int) -> str:
     tag = expected[0].tag
@@ -127,22 +146,28 @@ def aggregate(out_dir: Path, expected: list[Unit], targets: list[str], report_di
         return "\n".join(lines) + "\n"
 
     by_key = {(r["unit"]["source"], r["unit"]["step"]): r for r in rows}
+    steps = _aligned_steps(expected)
+    sources = sorted({unit.source for unit in expected})
     summary, comparisons = [], []
     for target_i, target in enumerate(targets):
+        if target not in sources:
+            raise ValueError(
+                f"target {target!r} has no native source run; include it in --sources"
+            )
         lines.extend(["", f"TARGET {target}",
                       f"{'source':<18} {'mean':>10} {'vs native':>11} {'wins':>7} "
                       f"{'95% block CI':>23} {'p Holm':>9}", "-" * 84])
         native = np.array([by_key[(target, i)]["targets"][target]["test"]
-                           for i in range(24)])
+                           for i in steps])
         eligible = []
-        for source in CORE:
+        for source in sources:
             ps, pt = POOLS[source], POOLS[target]
             if source != target and (ps.pair == pt.pair or ps.fee_tier == pt.fee_tier):
                 eligible.append(source)
         raw = []
         for source_i, source in enumerate(eligible):
             moved = np.array([by_key[(source, i)]["targets"][target]["test"]
-                              for i in range(24)])
+                              for i in steps])
             delta = moved - native
             rng = np.random.default_rng(seed + 100 * target_i + source_i)
             lo, hi, p = paired_block_inference(delta, rng, samples, block)
@@ -161,9 +186,9 @@ def aggregate(out_dir: Path, expected: list[Unit], targets: list[str], report_di
             lines.append(f"{row['source']:<18} {row['mean_transferred']:>10,.0f} "
                          f"{row['difference']:>+11,.0f} {row['wins']:>6.0%} "
                          f"{ci:>23} {row['p_holm']:>9.4f}")
-        for source in CORE:
+        for source in sources:
             moved = np.array([by_key[(source, i)]["targets"][target]["test"]
-                              for i in range(24)])
+                              for i in steps])
             summary.append({"target": target, "source": source,
                             "mean_reward": float(moved.mean()),
                             "native": source == target})

@@ -1,6 +1,5 @@
 #!/bin/bash
 #SBATCH --job-name=uniswap-transfer
-#SBATCH --partition=compsci
 #SBATCH --requeue
 #SBATCH --array=0-17
 #SBATCH --cpus-per-task=2

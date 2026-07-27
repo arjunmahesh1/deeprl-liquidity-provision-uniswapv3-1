@@ -59,7 +59,8 @@ each 0.05% pool. It is descriptively better in 22/25 USDC/WETH 0.30% cells, 22/2
 WBTC/WETH 0.30% cells, and 23/25 WETH/USDT 0.30% cells. No favorable 0.30% cell survives
 within-pool Holm correction at moving-block lengths 4, 6, or 8. At block length 4,
 28 adverse cells survive: 26 in 0.05% pools and two small-capital/high-cost cells in
-0.30% pools.
+0.30% pools. These counts are regenerated from the four `frontier.csv` files by
+`experiments.retail_frontier_summary`, rather than transcribed by hand.
 
 Adding conversion friction changes magnitudes but changes the sign of none of the 150
 pool/capital/gas cells relative to gas alone. The visible tier split therefore is not

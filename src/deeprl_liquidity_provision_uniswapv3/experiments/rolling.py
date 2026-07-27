@@ -128,6 +128,16 @@ def rolling_steps(n_windows: int, n_train: int = N_TRAIN, n_val: int = N_VAL) ->
     return steps
 
 
+def canonical_widths(widths, *, prefer_float: bool = False) -> list[int | float]:
+    """Make numerically identical CLI widths serialize identically."""
+    if prefer_float:
+        return [float(value) for value in widths]
+    return [
+        int(value) if float(value).is_integer() else float(value)
+        for value in widths
+    ]
+
+
 def config_tag(args) -> str:
     """A short stable hash of everything that changes what a unit COMPUTES.
 
@@ -142,12 +152,22 @@ def config_tag(args) -> str:
     values = {k: v for k, v in sorted(vars(args).items())
               if k in ("algo", "schedule", "widths", "shaping", "steps",
                        "seeds", "paper_extractor")}
+    # argparse returns explicit --widths as floats but the default as ints. Without
+    # normalization, `--widths 45 50 55` silently looked like a different collection.
+    # The preferred representation preserves both completed collections' resume keys:
+    # integer widths for primary runs, floats for matched-geometry runs.
+    execution_widths = getattr(args, "execution_widths", None)
+    values["widths"] = canonical_widths(
+        values["widths"], prefer_float=execution_widths is not None
+    )
     # Preserve the resume keys of the completed paper-convention collection. The new
     # field enters the key only for the non-default exploratory treatment.
     if getattr(args, "width_units", "spacing") != "spacing":
         values["width_units"] = args.width_units
-    if getattr(args, "execution_widths", None) is not None:
-        values["execution_widths"] = args.execution_widths
+    if execution_widths is not None:
+        values["execution_widths"] = canonical_widths(
+            execution_widths, prefer_float=True
+        )
     payload = json.dumps(values, default=str)
     return hashlib.sha1(payload.encode()).hexdigest()[:8]
 
@@ -338,7 +358,7 @@ def holm_adjust(pvalues: list[float]) -> list[float]:
 
 def _report_pool(pool: str, rows: list[dict], expected_n: int, bootstrap_seed: int,
                  bootstrap_samples: int, bootstrap_block: int) -> None:
-    """One pool is one inferential family; each row is one seed-averaged window."""
+    """Exploratory test-selected ranking; use combined.py for valid comparisons."""
     res, acts = {}, {}
     for r in sorted(rows, key=lambda z: z["unit"]["step"]):
         for arm, d in r["arms"].items():
@@ -350,7 +370,11 @@ def _report_pool(pool: str, rows: list[dict], expected_n: int, bootstrap_seed: i
     partial = len(rows) != expected_n
     status = "PARTIAL — NOT A FINAL RESULT" if partial else "COMPLETE"
 
-    print(f"\nPOOL {pool} — {status} — {len(rows)}/{expected_n} windows")
+    print("\nEXPLORATORY DIAGNOSTIC — DO NOT QUOTE THESE P-VALUES")
+    print("The reference strategy below is selected as the best arm on these same "
+          "test windows, so its p-values are optimistic. Use combined.py for the "
+          "prespecified, reportable comparisons.")
+    print(f"POOL {pool} — {status} — {len(rows)}/{expected_n} windows")
     print(f"{'strategy':<24} {'TEST':>9} {'mitigation':>11} {'vs best':>9} {'actions':>8}")
     print("-" * 66)
     for k in order:
@@ -368,7 +392,8 @@ def _report_pool(pool: str, rows: list[dict], expected_n: int, bootstrap_seed: i
         tests.append([k, d.mean(), (d > 0).mean(), lo, hi, p])
     adjusted = holm_adjust([t[-1] for t in tests])
 
-    print(f"\nPaired against {champ}; one row per seed-averaged window (n={len(rows)}).")
+    print(f"\nExploratory paired comparisons against test-selected {champ}; "
+          f"one row per seed-averaged window (n={len(rows)}).")
     print(f"Circular moving-block bootstrap: block={min(bootstrap_block, len(rows))}, "
           f"resamples={bootstrap_samples:,}, seed={bootstrap_seed}; Holm within pool.")
     print(f"{'strategy':<24} {'diff':>9} {'wins':>6} {'95% block CI':>23} "
