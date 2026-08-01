@@ -1,6 +1,5 @@
 """Gated reward-normalization diagnostic for matched-geometry PPO.
 
-The gate and treatment are frozen in ``reports/NORMALIZED_PPO_PROTOCOL.md``.
 Training uses reward-only VecNormalize; validation and test always report raw dollar
 reward from an unwrapped evaluation environment.
 """
@@ -128,7 +127,6 @@ def run_unit(pool: str, step: int, steps: int) -> dict:
         "normalized_ppo": result,
         "provenance": {
             "git_sha": _git_sha(),
-            "protocol": "reports/NORMALIZED_PPO_PROTOCOL.md",
             "widths": list(WIDTHS),
             "execution_widths": list(EXECUTION_WIDTHS),
             "schedule": "event_driven",
